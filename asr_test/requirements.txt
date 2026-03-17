@@ -1,0 +1,6 @@
+# 必选：WebSocket 连接
+websocket-client>=1.6.0
+# 真实语音测试（--demo）：下载样本并可能重采样
+numpy>=1.20.0
+# 可选：麦克风录音（Mac 需先 brew install portaudio）
+# pyaudio>=0.2.14
