@@ -1,8 +1,14 @@
 # VoiceInput
 
+English | [简体中文](README_CN.md)
+
 A macOS menu bar app for global voice-to-text input, powered by [Volcano Engine](https://www.volcengine.com/product/speech/asr) (火山引擎豆包) streaming ASR.
 
 Press a hotkey to start/stop recording. Recognized text is automatically pasted into the current input field.
+
+<!-- TODO: Add demo GIF here
+![Demo](docs/screenshots/demo.gif)
+-->
 
 ## Features
 
@@ -22,7 +28,7 @@ Press a hotkey to start/stop recording. Recognized text is automatically pasted 
 ## Install
 
 ```bash
-git clone https://github.com/liuhao/VoiceInput.git
+git clone https://github.com/liuhao04/VoiceInput.git
 cd VoiceInput
 ./scripts/build-and-install.sh
 ```
