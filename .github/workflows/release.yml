@@ -1,0 +1,63 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: macos-13
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Swift
+      uses: swift-actions/setup-swift@v1
+      with:
+        swift-version: '5.9'
+
+    - name: Build Release
+      run: |
+        swift build -c release
+
+        # Create app bundle
+        mkdir -p VoiceInput.app/Contents/MacOS
+        mkdir -p VoiceInput.app/Contents/Resources
+
+        # Copy binary
+        cp .build/release/VoiceInput VoiceInput.app/Contents/MacOS/
+
+        # Copy Info.plist
+        cp Info.plist VoiceInput.app/Contents/
+
+        # Copy icon if exists
+        if [ -f Resources/AppIcon.icns ]; then
+          cp Resources/AppIcon.icns VoiceInput.app/Contents/Resources/
+        fi
+
+        # Create DMG
+        hdiutil create -volname "VoiceInput" -srcfolder VoiceInput.app -ov -format UDZO VoiceInput.dmg
+
+    - name: Create Release
+      uses: softprops/action-gh-release@v1
+      with:
+        files: VoiceInput.dmg
+        body: |
+          ## VoiceInput ${{ github.ref_name }}
+
+          ### Installation
+          1. Download `VoiceInput.dmg`
+          2. Open the DMG and drag VoiceInput.app to your Applications folder
+          3. Launch VoiceInput and grant required permissions (Microphone, Accessibility)
+          4. Press F5 to start/stop voice input
+
+          ### Requirements
+          - macOS 13.0 or later
+          - Microphone permission
+          - Accessibility permission
+
+          ### What's Changed
+          See [CHANGELOG.md](https://github.com/liuhao04/VoiceInput/blob/main/CHANGELOG.md) for details.
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

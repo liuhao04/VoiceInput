@@ -1,5 +1,11 @@
 # VoiceInput
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Swift Version](https://img.shields.io/badge/Swift-5.9-orange.svg)](https://swift.org)
+[![Platform](https://img.shields.io/badge/Platform-macOS%2013%2B-blue.svg)](https://www.apple.com/macos)
+[![CI](https://github.com/liuhao04/VoiceInput/actions/workflows/ci.yml/badge.svg)](https://github.com/liuhao04/VoiceInput/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/liuhao04/VoiceInput)](https://github.com/liuhao04/VoiceInput/releases)
+
 English | [简体中文](README_CN.md)
 
 A macOS menu bar app for global voice-to-text input, powered by [Volcano Engine](https://www.volcengine.com/product/speech/asr) (火山引擎豆包) streaming ASR.
@@ -109,6 +115,14 @@ Sources/VoiceInput/
 # E2E test with real microphone (5 seconds)
 ./scripts/e2e-test-mic.sh
 ```
+
+## Contributing
+
+Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
+
+## Changelog
+
+See [CHANGELOG.md](CHANGELOG.md) for release history.
 
 ## License
 
