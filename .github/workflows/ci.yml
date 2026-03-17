@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    runs-on: macos-13
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Swift
+      uses: swift-actions/setup-swift@v1
+      with:
+        swift-version: '5.9'
+
+    - name: Build
+      run: swift build -c release
+
+    - name: Run Tests
+      run: |
+        if [ -f ./scripts/ci-test.sh ]; then
+          ./scripts/ci-test.sh
+        else
+          swift test
+        fi
+
+    - name: Check Code Style
+      run: |
+        # Basic checks
+        find Sources -name "*.swift" -exec grep -H "TODO" {} \; || true
+        find Sources -name "*.swift" -exec grep -H "FIXME" {} \; || true
