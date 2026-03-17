@@ -1,0 +1,103 @@
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Xcode
+*.xcuserstate
+*.xcworkspace
+!*.xcworkspace/contents.xcworkspacedata
+xcuserdata/
+*.moved-aside
+DerivedData/
+*.hmap
+*.ipa
+*.dSYM.zip
+*.dSYM
+
+# Swift Package Manager
+.build/
+.swiftpm/
+Package.resolved
+*.swiftpm
+
+# Swift PM auto-generated
+/.build
+/Packages
+/*.xcodeproj
+
+# CocoaPods
+Pods/
+
+# Carthage
+Carthage/Build/
+
+# Accio dependency management
+Dependencies/
+
+# fastlane
+fastlane/report.xml
+fastlane/Preview.html
+fastlane/screenshots/**/*.png
+fastlane/test_output
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# 敏感配置
+config.local.swift
+secrets.json
+.env
+.env.local
+
+# 日志文件
+*.log
+
+# 测试输出
+/tmp/
+*.result
+*.junit
+
+# Python (for asr_test/)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# 备份文件
+*.bak
+*.backup
+*~
+
+# 个人配置覆盖（如果有本地配置文件）
+config.local.py
+
+# Claude Code / Cursor (editor-specific)
+.claude/
+.cursor/
+
+# Test reports (generated)
+TEST_REPORT.md
