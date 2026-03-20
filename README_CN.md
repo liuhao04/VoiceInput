@@ -43,7 +43,7 @@ INSTALL_DIR="/Applications" ./scripts/build-and-install.sh
 
 - **App ID** — 从火山引擎控制台获取
 - **Access Token** — 从火山引擎控制台获取
-- **Boosting Table ID**（可选）— 用于自定义热词识别
+- **Boosting Table ID**（可选）— 用于自定义热词识别（暂不支持，开发中）
 
 也可以在启动前设置环境变量：
 
@@ -57,7 +57,7 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # 可选
 
 1. 访问[火山引擎语音控制台](https://console.volcengine.com/speech)
 2. 创建或选择一个应用以获取 App ID 和 Access Token
-3. （可选）创建热词表以获取 Boosting Table ID
+3. （可选）创建热词表以获取 Boosting Table ID（热词功能暂不支持）
 
 ## 权限
 
