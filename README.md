@@ -53,7 +53,7 @@ On first launch, click the menu bar icon > **Settings** and enter:
 
 - **App ID** — from Volcano Engine console
 - **Access Token** — from Volcano Engine console
-- **Boosting Table ID** (optional) — for custom hotword recognition
+- **Boosting Table ID** (optional) — for custom hotword recognition (not yet supported, under development)
 
 Alternatively, set environment variables before launching:
 
@@ -67,7 +67,7 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # optional
 
 1. Visit [Volcano Engine Speech Console](https://console.volcengine.com/speech)
 2. Create or select an application to get the App ID and Access Token
-3. (Optional) Create a hotword table to get a Boosting Table ID
+3. (Optional) Create a hotword table to get a Boosting Table ID (hotword boosting is not yet supported)
 
 ## Permissions
 

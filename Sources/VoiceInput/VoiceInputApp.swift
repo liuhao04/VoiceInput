@@ -61,11 +61,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pendingTriggerKey: TriggerKey?
     /// 记录在触发键按下期间是否曾经有过其他修饰键同时存在（用于过滤 Karabiner 等工具的合成事件）
     private var hadOtherModsDuringPending = false
+
     // otherModsFirstSeen 已移除：不再容忍瞬态干扰，只要出现过其他修饰键就阻止触发
     /// 触发键按下的时间戳，用于过滤过短的合成事件
     private var pendingTriggerTime: CFAbsoluteTime = 0
     /// 上次 toggleRecording 的时间戳，用于防抖（防止 Karabiner 等工具产生的快速连续触发）
     private var lastToggleTime: CFAbsoluteTime = 0
+    /// NSEvent 全局监听器（Cocoa 层级），用于捕获 BTT 等工具消费后仍可见的键盘事件
+    private var globalKeyMonitor: Any?
+    /// 触发键上次释放的时间戳，用于检测 BTT 导致的快速释放-重按序列
+    private var lastTriggerReleaseTime: CFAbsoluteTime = 0
+    /// 上次释放的触发键，用于匹配释放-重按序列
+    private var lastReleasedTriggerKey: TriggerKey?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("applicationDidFinishLaunching 开始")
@@ -134,8 +141,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // MARK: - 全局快捷键实现
 
     private func setupGlobalHotkey() {
-        // 使用 CGEvent tap 监听 flagsChanged（修饰键变化）和 keyDown（普通键按下）
-        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue)
+        // 使用 CGEvent tap 监听 flagsChanged（修饰键变化）和 keyDown/keyUp（普通键按下/释放）
+        let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
 
         // C 函数回调，通过 userInfo 回调到 AppDelegate
         let callback: CGEventTapCallBack = { _, type, event, userInfo -> Unmanaged<CGEvent>? in
@@ -143,7 +150,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let delegate = Unmanaged<AppDelegate>.fromOpaque(userInfo).takeUnretainedValue()
 
             if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                // 重新启用被系统禁用的 tap
                 if let tap = delegate.hotkeyTap {
                     CGEvent.tapEnable(tap: tap, enable: true)
                     Log.log("[Hotkey] Event tap 被重新启用")
@@ -151,9 +157,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 return Unmanaged.passRetained(event)
             }
 
-            if type == .keyDown {
-                // 有普通键按下，标记为组合操作
-                delegate.otherKeyPressed = true
+            if type == .keyDown || type == .keyUp {
+                if delegate.pendingTriggerKey != nil {
+                    delegate.otherKeyPressed = true
+                }
                 return Unmanaged.passRetained(event)
             }
 
@@ -164,15 +171,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return Unmanaged.passRetained(event)
         }
 
+        // 使用 .cghidEventTap 在 HID 系统层级监听，先于 BTT 等工具的 session-level event tap
+        // 这样即使 BTT 消费了 keyDown 事件，我们在 HID 层已经看到了
         guard let tap = CGEvent.tapCreate(
-            tap: .cgSessionEventTap,
+            tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
         ) else {
-            Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
+            Log.log("[Hotkey] ❌ 无法创建 HID event tap，尝试 session 级别...")
+            // 降级到 session 级别
+            guard let sessionTap = CGEvent.tapCreate(
+                tap: .cgSessionEventTap,
+                place: .headInsertEventTap,
+                options: .listenOnly,
+                eventsOfInterest: eventMask,
+                callback: callback,
+                userInfo: Unmanaged.passUnretained(self).toOpaque()
+            ) else {
+                Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
+                return
+            }
+            hotkeyTap = sessionTap
+            let runLoopSource = CFMachPortCreateRunLoopSource(nil, sessionTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: sessionTap, enable: true)
+            Log.log("[Hotkey] ✅ Session-level Event tap 已创建（降级模式）")
             return
         }
 
@@ -180,7 +206,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        Log.log("[Hotkey] ✅ Event tap 已创建")
+        Log.log("[Hotkey] ✅ HID-level Event tap 已创建（先于 BTT 等工具）")
+
+        // 额外添加 NSEvent 全局监听器（Cocoa 层级）
+        // BTT 等工具通过 active CGEvent tap 消费 keyDown 事件后，
+        // listenOnly CGEvent tap 看不到这些事件，但 NSEvent 全局监听器可能仍能收到。
+        // 这是第二道防线。
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+            guard let self = self, self.pendingTriggerKey != nil else { return }
+            self.otherKeyPressed = true
+            Log.log("[Hotkey] NSEvent 全局监听器检测到键盘事件 (keyCode=\(event.keyCode), type=\(event.type == .keyDown ? "keyDown" : "keyUp"))")
+        }
+        if globalKeyMonitor != nil {
+            Log.log("[Hotkey] ✅ NSEvent 全局键盘监听器已创建")
+        }
     }
 
     /// 处理修饰键变化事件
@@ -230,12 +269,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 修饰键刚按下：检查是否只有这一个修饰键被按下
                 let otherModFlags = currentDeviceFlags & ~keyFlag
                 if otherModFlags == 0 {
-                    pendingTriggerKey = key
-                    pendingTriggerTime = now
-                    otherKeyPressed = false
-                    hadOtherModsDuringPending = false
-                    // otherModsFirstSeen 已移除
-                    Log.log("[Hotkey] 触发键 \(key.displayName) 按下, flags=0x\(String(currentDeviceFlags, radix: 16))")
+                    // 检测 BTT 导致的快速释放-重按序列：
+                    // BTT 处理 Option+O 时会先释放 Option，再重新按下 Option，间隔极短（<100ms）
+                    // 如果同一个触发键在刚释放后很快又被按下，说明是 BTT 的合成序列，跳过
+                    let timeSinceLastRelease = now - lastTriggerReleaseTime
+                    if lastReleasedTriggerKey == key && timeSinceLastRelease < 0.5 {
+                        Log.log("[Hotkey] 触发键 \(key.displayName) 在释放后 \(Int(timeSinceLastRelease * 1000))ms 内再次按下, 忽略（BTT 合成序列）")
+                        pendingTriggerKey = nil
+                        hadOtherModsDuringPending = false
+                    } else {
+                        pendingTriggerKey = key
+                        pendingTriggerTime = now
+                        otherKeyPressed = false
+                        hadOtherModsDuringPending = false
+                        Log.log("[Hotkey] 触发键 \(key.displayName) 按下, flags=0x\(String(currentDeviceFlags, radix: 16))")
+                    }
                 } else {
                     // 有其他修饰键同时按下，不触发
                     Log.log("[Hotkey] 触发键 \(key.displayName) 按下但有其他修饰键, otherMods=0x\(String(otherModFlags, radix: 16)), 跳过")
@@ -243,32 +291,90 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     hadOtherModsDuringPending = false
                 }
             } else if !isDown && wasDown {
-                // 修饰键刚释放：检查是否满足单独按下条件
-                if let pending = pendingTriggerKey, pending == key, !otherKeyPressed, !hadOtherModsDuringPending {
+                // 修饰键刚释放：检查是否满足"单独按下并释放"条件
+                if let pending = pendingTriggerKey, pending == key, !hadOtherModsDuringPending {
                     // 确认释放时没有其他修饰键仍被按下
                     let remainingMods = currentDeviceFlags & ~keyFlag
                     if remainingMods == 0 {
-                        // 额外保护：检查按下到释放的时间间隔
-                        // 太短（< 30ms）说明是 Karabiner 等工具的合成事件快速闪烁
                         let holdDuration = now - pendingTriggerTime
                         if holdDuration < 0.03 {
+                            // 太短（< 30ms）说明是 Karabiner 等工具的合成事件快速闪烁
                             Log.log("[Hotkey] 触发键 \(key.displayName) 按下时间太短 (\(Int(holdDuration * 1000))ms), 忽略（可能是合成事件）")
+                        } else if otherKeyPressed {
+                            // otherKeyPressed: CGEvent tap 或 NSEvent 全局监听器检测到了键盘事件
+                            Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), 但检测到组合键(eventTap/NSEvent), 跳过")
+                        } else if isAnyNonModifierKeyPressed() {
+                            Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), 但 HID 状态表检测到有键按下, 跳过")
                         } else {
-                            Log.log("[Hotkey] 触发键 \(key.displayName) 被单独按下并释放 (\(Int(holdDuration * 1000))ms), isRecording=\(isRecording)")
-                            DispatchQueue.main.async {
-                                self.toggleRecording()
+                            // 诊断日志：检查各种 secondsSinceLastEventType 在 BTT 消费事件后是否有用
+                            let hidKeyDown = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+                            let hidKeyUp = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
+                            let csKeyDown = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+                            let csKeyUp = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+                            Log.log("[Hotkey] 诊断: holdDuration=\(String(format: "%.3f", holdDuration))s, HID keyDown=\(String(format: "%.3f", hidKeyDown))s, HID keyUp=\(String(format: "%.3f", hidKeyUp))s, CS keyDown=\(String(format: "%.3f", csKeyDown))s, CS keyUp=\(String(format: "%.3f", csKeyUp))s")
+
+                            // 核心判断：如果在 hold 期间有任何 keyDown 或 keyUp 发生，说明有组合键
+                            let hadKeyEventDuringHold = hidKeyDown < holdDuration || hidKeyUp < holdDuration || csKeyDown < holdDuration || csKeyUp < holdDuration
+                            if hadKeyEventDuringHold {
+                                Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), secondsSince 检测到期间有键盘事件, 跳过")
+                            } else {
+                                let triggerKeyName = key.displayName
+                                let isRec = isRecording
+                                let pendingStart = pendingTriggerTime
+                                Log.log("[Hotkey] 触发键 \(triggerKeyName) 预备触发 (\(Int(holdDuration * 1000))ms), 延迟50ms确认, isRecording=\(isRec)")
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                                    guard let self = self else { return }
+                                    if self.otherKeyPressed {
+                                        Log.log("[Hotkey] 延迟确认：检测到组合键(50ms内收到键盘事件), 取消触发")
+                                    } else if self.isAnyNonModifierKeyPressed() {
+                                        Log.log("[Hotkey] 延迟确认：HID 状态表检测到有键按下, 取消触发")
+                                    } else {
+                                        // 延迟后再查一次
+                                        let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
+                                        let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+                                        let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
+                                        let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+                                        let dCsKU = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+                                        let hadKeyEventDelayed = dHidKD < totalElapsed || dHidKU < totalElapsed || dCsKD < totalElapsed || dCsKU < totalElapsed
+                                        if hadKeyEventDelayed {
+                                            Log.log("[Hotkey] 延迟确认：secondsSince 检测到期间有键盘事件 (HID kd=\(String(format: "%.3f", dHidKD))s ku=\(String(format: "%.3f", dHidKU))s CS kd=\(String(format: "%.3f", dCsKD))s ku=\(String(format: "%.3f", dCsKU))s elapsed=\(String(format: "%.3f", totalElapsed))s), 取消触发")
+                                        } else {
+                                            Log.log("[Hotkey] 触发键 \(triggerKeyName) 确认单独按下并释放, isRecording=\(isRec)")
+                                            self.toggleRecording()
+                                        }
+                                    }
+                                }
                             }
                         }
                     } else {
                         Log.log("[Hotkey] 触发键 \(key.displayName) 释放但仍有其他修饰键, remainingMods=0x\(String(remainingMods, radix: 16))")
                     }
                 }
+                // 记录释放时间和释放的键，用于检测 BTT 快速释放-重按序列
+                lastTriggerReleaseTime = now
+                lastReleasedTriggerKey = key
                 pendingTriggerKey = nil
                 hadOtherModsDuringPending = false
             }
         }
 
         activeModifiers = currentDeviceFlags
+    }
+
+    /// 检查当前是否有任何非修饰键被物理按下
+    /// 通过 CGEventSourceKeyState 查询 HID 系统状态表，即使 BTT 等工具消费了 CGEvent，
+    /// 物理按键状态仍然会在 HID 状态表中体现。
+    /// 修饰键的 keyCode: 54/55=Cmd, 56/60=Shift, 58/61=Option, 59/62=Control, 57=CapsLock, 63=Fn
+    private func isAnyNonModifierKeyPressed() -> Bool {
+        let modifierKeyCodes: Set<CGKeyCode> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        for keyCode: CGKeyCode in 0...126 {
+            if modifierKeyCodes.contains(keyCode) { continue }
+            if CGEventSource.keyState(.hidSystemState, key: keyCode) {
+                Log.log("[Hotkey] HID 状态表: keyCode=\(keyCode) 当前按下")
+                return true
+            }
+        }
+        return false
     }
 
     /// LSUIElement 应用没有主菜单栏，需要手动创建 Edit 菜单以支持 Cmd+C/V/X/A 等标准快捷键
@@ -288,12 +394,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         NSApp.mainMenu = mainMenu
     }
 
+    private var statusMenu: NSMenu?
+
     private func setupMenuBar() {
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         updateStatusIcon()
         let menu = buildMenu()
         menu.delegate = self
-        statusItem?.menu = menu
+        statusMenu = menu
+        // 不直接设置 statusItem?.menu，改为通过 button action 手动弹出菜单
+        // 直接设置 menu 会导致 updateStatusIcon() 更改图标时 macOS 意外弹出菜单，
+        // 触发菜单项的 toggleRecording action，造成录音刚开始就被停止
+        if let button = statusItem?.button {
+            button.action = #selector(statusBarButtonClicked(_:))
+            button.target = self
+            button.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        }
+    }
+
+    @objc private func statusBarButtonClicked(_ sender: NSStatusBarButton) {
+        guard let menu = statusMenu else { return }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 5), in: sender)
     }
 
     /// 菜单栏图标：始终使用 mic.fill，录音时右上角叠加红色圆点
