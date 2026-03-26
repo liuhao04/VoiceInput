@@ -101,3 +101,7 @@ config.local.py
 
 # Test reports (generated)
 TEST_REPORT.md
+code-review.md
+
+# 用户替换规则文件
+replace-rules.json

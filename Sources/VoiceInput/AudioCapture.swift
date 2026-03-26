@@ -21,27 +21,10 @@ final class AudioCapture {
         Log.log("[Audio] start, 输入格式将由引擎决定")
         self.onBuffer = onBuffer
 
-        // 记录当前线程
-        let isMainThread = Thread.isMainThread
-        Log.log("[Audio] 当前线程: \(isMainThread ? "主线程" : "后台线程")")
-
-        // 注意：访问 engine.inputNode 必须在主线程，否则可能会阻塞
-        // 如果不在主线程，切换到主线程
-        Log.log("[Audio] 准备访问 inputNode...")
-        var inputNode: AVAudioInputNode!
-        if Thread.isMainThread {
-            inputNode = engine.inputNode
-            Log.log("[Audio] inputNode 获取成功（主线程）")
-        } else {
-            let sem = DispatchSemaphore(value: 0)
-            DispatchQueue.main.async {
-                inputNode = self.engine.inputNode
-                Log.log("[Audio] inputNode 获取成功（通过主线程）")
-                sem.signal()
-            }
-            Log.log("[Audio] 等待主线程返回 inputNode...")
-            sem.wait()
-        }
+        // macOS 13+ 中 AVAudioEngine.inputNode 可安全从任何线程访问
+        Log.log("[Audio] 准备访问 inputNode (线程: \(Thread.isMainThread ? "主线程" : "后台线程"))...")
+        let inputNode = engine.inputNode
+        Log.log("[Audio] inputNode 获取成功")
 
         Log.log("[Audio] 获取输入格式...")
         let inputFormat = inputNode.outputFormat(forBus: bus)

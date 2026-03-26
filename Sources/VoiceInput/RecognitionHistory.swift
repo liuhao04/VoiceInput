@@ -42,11 +42,15 @@ struct HistoryEntry: Codable {
         return f
     }()
 
-    /// 用于显示的时间字符串
-    var displayTime: String {
+    private static let displayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.dateFormat = "MM-dd HH:mm"
-        return f.string(from: time)
+        return f
+    }()
+
+    /// 用于显示的时间字符串
+    var displayTime: String {
+        Self.displayFormatter.string(from: time)
     }
 }
 
@@ -105,11 +109,11 @@ enum RecognitionHistory {
         let path = filePath(year: year, month: month)
 
         if let handle = try? FileHandle(forWritingTo: path) {
-            handle.seekToEndOfFile()
+            _ = try? handle.seekToEnd()
             if let d = line.data(using: .utf8) {
-                handle.write(d)
+                try? handle.write(contentsOf: d)
             }
-            handle.closeFile()
+            try? handle.close()
         } else {
             // 文件不存在，创建
             try? line.data(using: .utf8)?.write(to: path)

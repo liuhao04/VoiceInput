@@ -1,6 +1,7 @@
 import AppKit
 import AVFoundation
 import Foundation
+import UserNotifications
 
 @main
 struct VoiceInputApp {
@@ -40,16 +41,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var statusItem: NSStatusItem?
     private var audioCapture: AudioCapture?
     private var asr: VolcanoASR?
-    private var isRecording = false
-    private var accumulatedText: String = ""
+    // 以下属性为 internal 以供 AppDelegate+Tests.swift extension 访问
+    var isRecording = false
+    var accumulatedText: String = ""
     /// 本 app 在后台时记录的前台应用，粘贴时先激活它再注入，否则注入会发到本 app 无效
-    private var lastFrontmostApp: NSRunningApplication?
-    private var frontmostCaptureTimer: DispatchSourceTimer?
-    private var inputPanel: VoiceInputPanel?
+    var lastFrontmostApp: NSRunningApplication?
+    var frontmostCaptureTimer: DispatchSourceTimer?
+    var inputPanel: VoiceInputPanel?
     /// 测试模式专用：保存固定的目标应用（避免被 menuWillOpen 等自动更新）
-    private var testTargetApp: NSRunningApplication?
+    var testTargetApp: NSRunningApplication?
     /// 编辑模式专用：进入编辑模式时保存的目标应用（防止编辑过程中被定时器更新）
-    private var editModeTargetApp: NSRunningApplication?
+    var editModeTargetApp: NSRunningApplication?
 
     // MARK: - 全局快捷键
     private var hotkeyTap: CFMachPort?
@@ -69,6 +71,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var lastToggleTime: CFAbsoluteTime = 0
     /// NSEvent 全局监听器（Cocoa 层级），用于捕获 BTT 等工具消费后仍可见的键盘事件
     private var globalKeyMonitor: Any?
+    /// NSEvent 全局鼠标监听器，防止 Option+鼠标点击（如终端移动光标）误触发语音识别
+    private var globalMouseMonitor: Any?
     /// 触发键上次释放的时间戳，用于检测 BTT 导致的快速释放-重按序列
     private var lastTriggerReleaseTime: CFAbsoluteTime = 0
     /// 上次释放的触发键，用于匹配释放-重按序列
@@ -82,7 +86,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Log.log("菜单栏已设置")
         setupGlobalHotkey()
         Log.log("全局快捷键已设置，触发键: \(Config.triggerKeys.map { $0.displayName })")
+        checkAccessibilityPermission()
         requestMicPermission()
+        requestNotificationPermission()
         startFrontmostCaptureTimer()
         Log.log("applicationDidFinishLaunching 结束")
 
@@ -161,6 +167,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if delegate.pendingTriggerKey != nil {
                     delegate.otherKeyPressed = true
                 }
+                // 回车键（keyCode 36）在录音中且面板可见时，停止录音并插入文本
+                if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 36 {
+                    if delegate.isRecording, delegate.inputPanel?.panel.isVisible == true {
+                        Log.log("[Hotkey] 检测到回车键，停止录音并插入文本")
+                        DispatchQueue.main.async {
+                            delegate.stopRecording()
+                        }
+                    }
+                }
+                // ESC 键（keyCode 53）：关闭面板，不插入文字
+                if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 53 {
+                    if delegate.isRecording || delegate.inputPanel?.panel.isVisible == true {
+                        Log.log("[Hotkey] 检测到 ESC 键，取消录音")
+                        DispatchQueue.main.async {
+                            delegate.cancelRecording()
+                        }
+                    }
+                }
                 return Unmanaged.passRetained(event)
             }
 
@@ -192,6 +216,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
             ) else {
                 Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
+                checkAccessibilityPermission()
                 return
             }
             hotkeyTap = sessionTap
@@ -219,6 +244,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         if globalKeyMonitor != nil {
             Log.log("[Hotkey] ✅ NSEvent 全局键盘监听器已创建")
+        }
+
+        // NSEvent 鼠标监听器：防止 Option+鼠标点击（如终端中移动光标）误触发
+        // 使用 NSEvent 全局监听器而非 CGEvent tap，不会干扰鼠标事件的正常传递
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            guard let self = self, self.pendingTriggerKey != nil else { return }
+            self.otherKeyPressed = true
+            Log.log("[Hotkey] NSEvent 全局监听器检测到鼠标点击, 标记 otherKeyPressed")
+        }
+        if globalMouseMonitor != nil {
+            Log.log("[Hotkey] ✅ NSEvent 全局鼠标监听器已创建")
         }
     }
 
@@ -418,7 +454,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 菜单栏图标：始终使用 mic.fill，录音时右上角叠加红色圆点
-    private func updateStatusIcon() {
+    func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         button.title = ""
 
@@ -467,6 +503,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ",")
         settingsItem.target = self
         menu.addItem(settingsItem)
+        let replaceRulesItem = NSMenuItem(title: "替换规则...", action: #selector(openReplaceRules), keyEquivalent: "")
+        replaceRulesItem.target = self
+        menu.addItem(replaceRulesItem)
         menu.addItem(NSMenuItem.separator())
 
         let historyItem = NSMenuItem(title: "识别历史", action: #selector(openHistory), keyEquivalent: "h")
@@ -494,6 +533,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func openSettings() {
         SettingsWindow.shared.show()
+    }
+
+    @objc private func openReplaceRules() {
+        SettingsWindow.shared.show(tab: 2)
     }
 
     @objc private func openHistory() {
@@ -534,6 +577,35 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func requestNotificationPermission() {
+        UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound]) { granted, error in
+            if let error = error {
+                Log.log("[Notification] 通知权限请求失败: \(error.localizedDescription)")
+            } else {
+                Log.log("[Notification] 通知权限: \(granted ? "已授权" : "被拒绝")")
+            }
+        }
+    }
+
+    private func checkAccessibilityPermission() {
+        if !AXIsProcessTrusted() {
+            Log.log("⚠️ 辅助功能权限未授予")
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                alert.messageText = "需要辅助功能权限"
+                alert.informativeText = "VoiceInput 需要辅助功能权限来监听全局快捷键和插入文字。\n请在系统设置中授予权限后重启应用。"
+                alert.alertStyle = .warning
+                alert.addButton(withTitle: "打开系统设置")
+                alert.addButton(withTitle: "稍后")
+                if alert.runModal() == .alertFirstButtonReturn {
+                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                        NSWorkspace.shared.open(url)
+                    }
+                }
+            }
+        }
+    }
+
     @objc private func openLogFile() {
         NSWorkspace.shared.open(Log.logFileURL)
     }
@@ -560,7 +632,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func toggleRecording() {
+    @objc func toggleRecording() {
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastToggleTime
         Log.log("toggleRecording 被调用, isRecording=\(isRecording), 距上次=\(String(format: "%.3f", elapsed))s")
@@ -571,6 +643,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             return
         }
         lastToggleTime = now
+
+        // 编辑模式下按 Option：等同于回车，结束编辑并插入文字
+        if inputPanel?.isEditing == true {
+            let text = inputPanel?.getCurrentText() ?? ""
+            inputPanel?.exitEditModeForTesting()
+            handleEditingFinished(text)
+            return
+        }
 
         if isRecording {
             stopRecording()
@@ -602,6 +682,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             inputPanel?.onEditingFinished = { [weak self] text in
                 self?.handleEditingFinished(text)
             }
+            // ESC 取消编辑
+            inputPanel?.onCancelled = { [weak self] in
+                self?.cancelRecording()
+            }
         }
         let point = cursorOrMouseScreenPoint()
         inputPanel?.show(near: point)
@@ -609,9 +693,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         asr = VolcanoASR()
         asr?.start(
-            onText: { text in
+            onText: { text, isFinal in
                 DispatchQueue.main.async {
-                    (NSApp.delegate as? AppDelegate)?.appendRecognizedText(text)
+                    (NSApp.delegate as? AppDelegate)?.appendRecognizedText(text, isFinal: isFinal)
                 }
             },
             onError: { [weak self] err in
@@ -660,24 +744,76 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// ESC 取消：关闭面板，不插入文字
+    func cancelRecording() {
+        Log.log("cancelRecording: 取消录音，不插入文字")
+        finalResultTimer?.cancel()
+        finalResultTimer = nil
+        isRecording = false
+        updateStatusIcon()
+
+        audioCapture?.stop()
+        audioCapture = nil
+        asr?.close()
+        asr = nil
+        accumulatedText = ""
+
+        inputPanel?.hide()
+        inputPanel = nil
+    }
+
+    /// 等待二遍识别的超时定时器
+    private var finalResultTimer: DispatchWorkItem?
+
     private func stopRecording() {
         Log.log("stopRecording 开始, accumulatedText 长度=\(accumulatedText.count)")
         isRecording = false
         updateStatusIcon()
 
-        // 停止音频和识别
+        // 停止音频捕获
         audioCapture?.stop()
         audioCapture = nil
-        asr?.stop()
+
+        // 如果没有识别到任何文字，直接关闭面板，不需要等待二遍识别
+        if accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            Log.log("stopRecording: 无识别文字，直接关闭")
+            asr?.close()
+            asr = nil
+            inputPanel?.hide()
+            inputPanel = nil
+            return
+        }
+
+        // 发送负包，但保持连接等待二遍识别结果
+        asr?.sendLastPacket()
+
+        // 面板保持显示当前文本，等待二遍结果更新
+
+        // 设置超时：最多等 2 秒，超时后使用当前结果自动插入
+        let timeout = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            Log.log("stopRecording: 等待二遍识别超时，使用当前结果插入")
+            self.finishAndInsertText()
+        }
+        finalResultTimer = timeout
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
+
+        Log.log("stopRecording: 已发负包，等待二遍识别结果（最多2秒）")
+    }
+
+    /// 二遍识别结果到达或超时后，插入文本
+    private func finishAndInsertText() {
+        finalResultTimer?.cancel()
+        finalResultTimer = nil
+
+        asr?.close()
         asr = nil
 
-        // 直接插入文本并关闭面板
-        Log.log("stopRecording 结束，直接插入文本")
         closePanelAndInsertText()
     }
 
     /// 用户再次按 F5 或通过其他方式关闭面板时，自动插入文本
-    private func closePanelAndInsertText() {
+    func closePanelAndInsertText() {
         let text = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 隐藏面板
@@ -704,19 +840,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 流式 ASR 每次回调的是当前完整结果（递增），用最新结果替换而非追加
-    private func appendRecognizedText(_ text: String) {
-        accumulatedText = text
+    private func appendRecognizedText(_ text: String, isFinal: Bool = false) {
+        let replaced = TextReplacer.shared.apply(text)
+        accumulatedText = replaced
         // 安全检查：如果正在录音但面板不可见，重新显示
         if isRecording, let panel = inputPanel, !panel.panel.isVisible {
             Log.log("[安全恢复] 面板在录音中不可见，重新显示")
             let point = cursorOrMouseScreenPoint()
             panel.show(near: point)
         }
-        inputPanel?.updateText(text)
+        inputPanel?.updateText(replaced)
+
+        // 收到二遍识别最终结果（flags=0x03），自动插入
+        if isFinal && !isRecording && finalResultTimer != nil {
+            Log.log("收到二遍识别最终结果，自动插入")
+            finishAndInsertText()
+        }
     }
 
     /// 返回面板显示位置：优先使用文本光标位置，失败则使用鼠标位置
-    private func cursorOrMouseScreenPoint() -> NSPoint {
+    func cursorOrMouseScreenPoint() -> NSPoint {
         Log.log("[cursorOrMouseScreenPoint] 开始获取光标位置")
 
         // 方法1: 使用 CursorLocator 精确获取输入光标位置
@@ -792,20 +935,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 出错时先停止录音释放麦克风，再弹窗（避免弹窗期间一直占麦）
     private func stopRecordingAndShowError(_ message: String) {
+        // 非录音状态下的错误（如关闭连接时的 socket 错误）不弹窗
+        guard isRecording else {
+            Log.log("stopRecordingAndShowError: 非录音状态，忽略错误: \(message)")
+            return
+        }
         stopRecording()
         showError(message)
     }
 
     private func showError(_ message: String) {
-        let alert = NSAlert()
-        alert.messageText = "语音输入"
-        alert.informativeText = message
-        alert.alertStyle = .warning
-        alert.runModal()
+        let content = UNMutableNotificationContent()
+        content.title = "语音输入"
+        content.body = message
+        content.sound = .default
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                // 通知发送失败（权限被拒等），fallback 到模态弹窗
+                Log.log("[Error] 通知发送失败: \(error.localizedDescription)，使用弹窗显示")
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "语音输入"
+                    alert.informativeText = message
+                    alert.alertStyle = .warning
+                    alert.runModal()
+                }
+            }
+        }
     }
 
     /// 点击面板时：停止录音和识别，进入编辑模式
-    private func handlePanelClicked() {
+    func handlePanelClicked() {
         Log.log("handlePanelClicked: 停止录音和识别")
 
         // 保存当前的目标应用，防止编辑过程中被定时器更新
@@ -827,7 +988,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     /// 编辑完成后按回车时：插入文本到目标应用
-    private func handleEditingFinished(_ text: String) {
+    func handleEditingFinished(_ text: String) {
         Log.log("handleEditingFinished: 插入文本长度=\(text.count)")
         Log.log("handleEditingFinished: editModeTargetApp = \(editModeTargetApp?.localizedName ?? "nil") (\(editModeTargetApp?.bundleIdentifier ?? "nil"))")
         Log.log("handleEditingFinished: lastFrontmostApp = \(lastFrontmostApp?.localizedName ?? "nil") (\(lastFrontmostApp?.bundleIdentifier ?? "nil"))")
@@ -863,728 +1024,5 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    // MARK: - 测试功能
-
-    /// 右Option键插入功能自动测试
-    private func runRightOptionTest() {
-        Log.log("[TEST] ========== 开始右Option键测试 ==========")
-
-        // 1. Mock 识别结果
-        accumulatedText = "右Option测试文字"
-        Log.log("[TEST] Step 1: Mock 识别结果 = \"\(accumulatedText)\"")
-
-        // 2. 设置测试目标应用（TextEdit）
-        if let textEdit = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.TextEdit" }) {
-            testTargetApp = textEdit
-            lastFrontmostApp = textEdit
-            textEdit.activate(options: .activateIgnoringOtherApps)
-            Log.log("[TEST] Step 2: 设置目标应用 = TextEdit 并激活")
-        } else {
-            Log.log("[TEST] ❌ 未找到 TextEdit，请先打开 TextEdit")
-            return
-        }
-
-        // 3. 模拟录音状态
-        isRecording = true
-        updateStatusIcon()
-        Log.log("[TEST] Step 3: 设置 isRecording = true")
-
-        // 4. 显示面板（模拟停止录音后的状态）
-        if inputPanel == nil {
-            inputPanel = VoiceInputPanel()
-            inputPanel?.onPanelClicked = { [weak self] in
-                self?.handlePanelClicked()
-            }
-            inputPanel?.onEditingFinished = { [weak self] text in
-                self?.handleEditingFinished(text)
-            }
-        }
-
-        let testPoint = NSPoint(x: 800, y: 400)
-        inputPanel?.show(near: testPoint)
-        inputPanel?.updateText(accumulatedText)
-        Log.log("[TEST] Step 4: 面板已显示在 \(testPoint)")
-
-        // 5. 第一次调用 toggleRecording（模拟第一次按右Option - 应该停止录音）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            Log.log("[TEST] Step 5: 第一次按右Option (应该停止录音)")
-            Log.log("[TEST] 按下前: isRecording=\(self.isRecording), panel visible=\(self.inputPanel?.panel.isVisible ?? false)")
-            self.toggleRecording()
-            Log.log("[TEST] 按下后: isRecording=\(self.isRecording), panel visible=\(self.inputPanel?.panel.isVisible ?? false)")
-
-            // 6. 等待一下，然后第二次调用 toggleRecording（模拟第二次按右Option - 应该插入文字）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                Log.log("[TEST] Step 6: 第二次按右Option (应该插入文字)")
-                Log.log("[TEST] 按下前: isRecording=\(self.isRecording), panel visible=\(self.inputPanel?.panel.isVisible ?? false)")
-                self.toggleRecording()
-                Log.log("[TEST] 按下后: isRecording=\(self.isRecording), panel visible=\(self.inputPanel?.panel.isVisible ?? false)")
-
-                // 7. 验证结果
-                DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                    self.verifyRightOptionTest()
-                }
-            }
-        }
-    }
-
-    private func verifyRightOptionTest() {
-        Log.log("[TEST] Step 7: 验证测试结果")
-
-        // 检查面板状态
-        if let panel = inputPanel {
-            Log.log("[TEST] ❌ 面板仍然存在，visible=\(panel.panel.isVisible)")
-        } else {
-            Log.log("[TEST] ✅ 面板已关闭")
-        }
-
-        // 检查日志中是否有成功插入的记录
-        // 因为 PasteboardPaste 使用 AX API 时不通过剪贴板，所以检查日志是最可靠的验证方式
-        Log.log("[TEST] 查看上面的日志：")
-        Log.log("[TEST] - 如果看到 '[Paste] ✅ AX API 插入成功'，说明文字已成功插入")
-        Log.log("[TEST] - 如果看到 '将注入 11 字到目标应用: 文本编辑'，说明功能正常")
-        Log.log("[TEST] ========== 测试完成 ==========")
-        Log.log("[TEST] 请检查 TextEdit 是否有 '右Option测试文字' 来确认最终结果")
-    }
-
-    /// Gemini 页面插入功能测试
-    private func runGeminiTest() {
-        Log.log("[TEST] ========== 开始 Gemini 插入测试 ==========")
-
-        // 1. 读取测试配置
-        let testTextPath = "/tmp/voiceinput_test/test_text.txt"
-        let targetAppPath = "/tmp/voiceinput_test/target_app.txt"
-
-        guard let testText = try? String(contentsOfFile: testTextPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
-              let targetBundle = try? String(contentsOfFile: targetAppPath, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines) else {
-            Log.log("[TEST] ❌ 无法读取测试配置文件")
-            return
-        }
-
-        Log.log("[TEST] Step 1: 测试文字 = \"\(testText)\"")
-        Log.log("[TEST] Step 2: 目标应用 = \(targetBundle)")
-
-        // 2. 找到目标浏览器
-        guard let browserApp = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == targetBundle }) else {
-            Log.log("[TEST] ❌ 未找到浏览器: \(targetBundle)")
-            return
-        }
-
-        testTargetApp = browserApp
-        lastFrontmostApp = browserApp
-        Log.log("[TEST] Step 3: 找到浏览器: \(browserApp.localizedName ?? "Unknown")")
-
-        // 3. 等待浏览器成为前台应用（用户应该已经按了 Cmd+K）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            // 4. Mock 识别结果
-            self.accumulatedText = testText
-            Log.log("[TEST] Step 4: 设置识别结果")
-
-            // 5. 获取当前焦点元素信息（诊断用）
-            self.logFocusedElementInfo()
-
-            // 6. 模拟语音输入流程：显示面板
-            if self.inputPanel == nil {
-                self.inputPanel = VoiceInputPanel()
-                self.inputPanel?.onPanelClicked = { [weak self] in
-                    self?.handlePanelClicked()
-                }
-                self.inputPanel?.onEditingFinished = { [weak self] text in
-                    self?.handleEditingFinished(text)
-                }
-            }
-
-            let point = self.cursorOrMouseScreenPoint()
-            Log.log("[TEST] Step 5: 光标位置 = \(point)")
-            self.inputPanel?.show(near: point)
-            self.inputPanel?.updateText(testText)
-
-            // 7. 直接调用插入（模拟按右Option）
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                Log.log("[TEST] Step 6: 开始插入文字")
-                self.closePanelAndInsertText()
-
-                // 8. 等待插入完成，输出结果
-                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                    Log.log("[TEST] ========== 测试完成 ==========")
-                    Log.log("[TEST] 查看上面的日志中：")
-                    Log.log("[TEST] - [Paste] 日志显示了插入方法（AX API / Cmd+V）")
-                    Log.log("[TEST] - 焦点元素信息显示了目标输入框的属性")
-                    Log.log("[TEST] 请在浏览器中检查文字是否成功插入")
-                }
-            }
-        }
-    }
-
-    /// 诊断用：输出当前焦点元素的详细信息
-    private func logFocusedElementInfo() {
-        guard let frontmostApp = NSWorkspace.shared.frontmostApplication,
-              let pid = frontmostApp.processIdentifier as pid_t? else {
-            Log.log("[TEST] ❌ 无法获取前台应用")
-            return
-        }
-
-        let appElement = AXUIElementCreateApplication(pid)
-        Log.log("[TEST] 前台应用: \(frontmostApp.localizedName ?? "Unknown") (\(frontmostApp.bundleIdentifier ?? ""))")
-
-        // 获取焦点元素
-        var focusedElement: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement) == .success,
-              let focused = focusedElement else {
-            Log.log("[TEST] ❌ 无法获取焦点元素")
-            return
-        }
-
-        let element = focused as! AXUIElement
-
-        // 获取角色
-        var roleValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue) == .success,
-           let role = roleValue as? String {
-            Log.log("[TEST] 焦点元素角色: \(role)")
-        }
-
-        // 获取角色描述
-        var roleDescValue: CFTypeRef?
-        if AXUIElementCopyAttributeValue(element, kAXRoleDescriptionAttribute as CFString, &roleDescValue) == .success,
-           let roleDesc = roleDescValue as? String {
-            Log.log("[TEST] 角色描述: \(roleDesc)")
-        }
-
-        // 获取所有属性
-        var attributeNames: CFArray?
-        if AXUIElementCopyAttributeNames(element, &attributeNames) == .success,
-           let names = attributeNames as? [String] {
-            Log.log("[TEST] 可用属性 (\(names.count)): \(names.prefix(10).joined(separator: ", "))")
-
-            // 检查是否支持 selectedText
-            if names.contains(kAXSelectedTextAttribute as String) {
-                Log.log("[TEST] ✅ 支持 AXSelectedText")
-            } else {
-                Log.log("[TEST] ❌ 不支持 AXSelectedText")
-            }
-
-            // 检查是否支持 value
-            if names.contains(kAXValueAttribute as String) {
-                Log.log("[TEST] ✅ 支持 AXValue")
-                var value: CFTypeRef?
-                if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
-                   let val = value as? String {
-                    Log.log("[TEST] 当前值: \"\(val)\"")
-                }
-            } else {
-                Log.log("[TEST] ❌ 不支持 AXValue")
-            }
-        }
-    }
-
-    /// 面板编辑功能自动测试
-    private func runPanelEditTest() {
-        Log.log("[TEST] ========== 开始面板编辑测试 ==========")
-
-        // 1. Mock 识别结果
-        accumulatedText = "原始测试文字"
-        Log.log("[TEST] Step 1: Mock 识别结果 = \"\(accumulatedText)\"")
-
-        // 2. 设置测试目标应用（TextEdit）并激活它
-        if let textEdit = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.TextEdit" }) {
-            testTargetApp = textEdit  // 使用测试专用变量
-            lastFrontmostApp = textEdit  // 也设置常规变量以保证兼容性
-            textEdit.activate(options: .activateIgnoringOtherApps)  // 激活TextEdit
-            Log.log("[TEST] Step 2: 设置目标应用 = TextEdit 并激活")
-        } else {
-            Log.log("[TEST] ❌ 未找到 TextEdit，请先打开 TextEdit")
-            return
-        }
-
-        // 3. 显示面板
-        if inputPanel == nil {
-            inputPanel = VoiceInputPanel()
-            inputPanel?.onPanelClicked = { [weak self] in
-                self?.handlePanelClicked()
-            }
-            inputPanel?.onEditingFinished = { [weak self] text in
-                self?.handleEditingFinished(text)
-            }
-        }
-
-        let testPoint = NSPoint(x: 800, y: 400)
-        inputPanel?.show(near: testPoint)
-        inputPanel?.updateText(accumulatedText)
-        Log.log("[TEST] Step 3: 面板已显示在 (\(testPoint.x), \(testPoint.y))")
-        Log.log("[TEST] TEST_PANEL_SHOWN")
-
-        // 4. 等待 1 秒后检测面板状态
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            self.checkPanelState()
-        }
-    }
-
-    private func checkPanelState() {
-        guard let panel = inputPanel else {
-            Log.log("[TEST] ❌ 面板不存在")
-            return
-        }
-
-        Log.log("[TEST] Step 4: 检查面板状态")
-        Log.log("[TEST]   - isVisible: \(panel.panel.isVisible)")
-        Log.log("[TEST]   - isKeyWindow: \(panel.panel.isKeyWindow)")
-        Log.log("[TEST]   - frame: \(panel.panel.frame)")
-
-        // 5. 模拟点击面板
-        let panelFrame = panel.panel.frame
-        let clickX = panelFrame.origin.x + panelFrame.width / 2
-        let clickY = panelFrame.origin.y + panelFrame.height / 2
-
-        Log.log("[TEST] Step 5: 模拟点击面板中心 (\(clickX), \(clickY))")
-        simulateMouseClick(at: NSPoint(x: clickX, y: clickY))
-
-        // 6. 等待点击生效，检查编辑状态
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            self.checkEditState()
-        }
-    }
-
-    private func checkEditState() {
-        guard let panel = inputPanel else {
-            Log.log("[TEST] ❌ 面板不存在")
-            return
-        }
-
-        Log.log("[TEST] Step 6: 检查编辑状态")
-
-        // 使用 Accessibility API 检查 textView 状态
-        let pid = ProcessInfo.processInfo.processIdentifier
-        let appElement = AXUIElementCreateApplication(pid)
-
-        var windowElement: CFTypeRef?
-        if AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &windowElement) == .success,
-           let windows = windowElement as? [AXUIElement],
-           !windows.isEmpty {
-
-            let window = windows[0]
-
-            // 尝试查找 textView
-            var roleValue: CFTypeRef?
-            AXUIElementCopyAttributeValue(window, kAXRoleAttribute as CFString, &roleValue)
-            Log.log("[TEST]   - Window role: \(roleValue as? String ?? "unknown")")
-
-            // 检查是否是 key window
-            var isKeyValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(window, kAXMainAttribute as CFString, &isKeyValue) == .success {
-                let isKey = (isKeyValue as? Bool) ?? false
-                Log.log("[TEST]   - isKeyWindow: \(isKey)")
-            }
-        }
-
-        Log.log("[TEST]   - panel.isKeyWindow: \(panel.panel.isKeyWindow)")
-
-        // 7. 直接修改 textView 内容（模拟键盘输入在某些情况下不生效）
-        Log.log("[TEST] Step 7: 修改面板文字")
-        self.inputPanel?.setTextForTesting("编辑后的文字")
-        Log.log("[TEST] ✅ 已修改文字: \"编辑后的文字\"")
-
-
-        // 8. 模拟按回车（直接触发面板的回调而不是真正的键盘事件）
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-            Log.log("[TEST] Step 8: 模拟按下回车键")
-            Log.log("[TEST] 按回车前 lastFrontmostApp = \\(self.lastFrontmostApp?.localizedName ?? \"nil\") (\\(self.lastFrontmostApp?.bundleIdentifier ?? \"nil\"))")
-            self.inputPanel?.simulateEnterForTesting()
-            Log.log("[TEST] ✅ 已按回车")
-
-            // 9. 验证结果
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                self.verifyTestResult()
-            }
-        }
-    }
-
-    private func simulateMouseClick(at point: NSPoint) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-
-        if let mouseDown = CGEvent(mouseEventSource: source, mouseType: .leftMouseDown, mouseCursorPosition: point, mouseButton: .left),
-           let mouseUp = CGEvent(mouseEventSource: source, mouseType: .leftMouseUp, mouseCursorPosition: point, mouseButton: .left) {
-
-            mouseDown.post(tap: .cghidEventTap)
-            usleep(50000) // 50ms
-            mouseUp.post(tap: .cghidEventTap)
-
-            Log.log("[TEST] ✅ 已发送鼠标点击事件")
-        } else {
-            Log.log("[TEST] ❌ 无法创建鼠标事件")
-        }
-    }
-
-    private func simulateTextInput(_ text: String) {
-        // 先全选
-        simulateKeyPress(keyCode: 0x00, modifiers: .maskCommand) // Cmd+A
-        usleep(100000)
-
-        // 输入新文字
-        for char in text {
-            let string = String(char)
-            if let event = CGEvent(keyboardEventSource: nil, virtualKey: 0, keyDown: true) {
-                var utf16Chars: [UniChar] = Array(string.utf16)
-                utf16Chars.withUnsafeMutableBufferPointer { buffer in
-                    event.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                }
-                event.post(tap: .cghidEventTap)
-                usleep(50000)
-            }
-        }
-
-        Log.log("[TEST] ✅ 已输入文字: \"\(text)\"")
-    }
-
-    private func simulateEnterKey() {
-        Log.log("[TEST] Step 8: 模拟按下回车键")
-        simulateKeyPress(keyCode: 0x24, modifiers: []) // Return key
-        Log.log("[TEST] ✅ 已按回车")
-    }
-
-    private func simulateKeyPress(keyCode: CGKeyCode, modifiers: CGEventFlags) {
-        let source = CGEventSource(stateID: .combinedSessionState)
-
-        if let keyDown = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
-           let keyUp = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) {
-
-            keyDown.flags = modifiers
-            keyUp.flags = modifiers
-
-            keyDown.post(tap: .cghidEventTap)
-            usleep(50000)
-            keyUp.post(tap: .cghidEventTap)
-        }
-    }
-
-    private func verifyTestResult() {
-        Log.log("[TEST] Step 9: 验证测试结果")
-
-        // 读取 TextEdit 内容
-        let script = """
-        tell application "TextEdit"
-            if it is running then
-                try
-                    return text of front document
-                on error
-                    return "ERROR_NO_DOCUMENT"
-                end try
-            else
-                return "ERROR_NOT_RUNNING"
-            end if
-        end tell
-        """
-
-        if let scriptObject = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            let result = scriptObject.executeAndReturnError(&error)
-
-            if let err = error {
-                Log.log("[TEST] ❌ AppleScript 错误: \(err)")
-                Log.log("[TEST] ========== 测试失败 ==========")
-            } else {
-                let content = result.stringValue ?? ""
-                Log.log("[TEST] TextEdit 内容: \"\(content)\"")
-
-                if content.contains("编辑后的文字") {
-                    Log.log("[TEST] ✅✅✅ 测试通过！")
-                    Log.log("[TEST] ========== 测试成功 ==========")
-                } else {
-                    Log.log("[TEST] ❌ 测试失败：期望 '编辑后的文字'，实际 '\(content)'")
-                    Log.log("[TEST] ========== 测试失败 ==========")
-
-                    // 输出诊断信息
-                    diagnosePanelIssue()
-                }
-            }
-        }
-    }
-
-    private func diagnosePanelIssue() {
-        Log.log("[TEST] === 诊断信息 ===")
-
-        if let panel = inputPanel {
-            Log.log("[TEST] 面板状态:")
-            Log.log("[TEST]   - isVisible: \(panel.panel.isVisible)")
-            Log.log("[TEST]   - isKeyWindow: \(panel.panel.isKeyWindow)")
-            Log.log("[TEST]   - canBecomeKey: \(panel.panel.canBecomeKey)")
-            Log.log("[TEST]   - styleMask: \(panel.panel.styleMask.rawValue)")
-            Log.log("[TEST]   - level: \(panel.panel.level.rawValue)")
-        } else {
-            Log.log("[TEST] ❌ 面板已被销毁")
-        }
-
-        Log.log("[TEST] === 诊断结束 ===")
-    }
-
-    /// 多显示器面板定位测试
-    private func runMultiMonitorTest() {
-        Log.log("[MULTI-MONITOR] ========== 开始多显示器测试 ==========")
-
-        // 1. 记录所有屏幕信息
-        Log.log("[MULTI-MONITOR] Step 1: 检测屏幕配置")
-        let screens = NSScreen.screens
-        Log.log("[MULTI-MONITOR] 检测到 \(screens.count) 个屏幕")
-
-        for (index, screen) in screens.enumerated() {
-            let frame = screen.frame
-            let visibleFrame = screen.visibleFrame
-            Log.log("[MULTI-MONITOR] 屏幕 \(index): frame=\(frame), visibleFrame=\(visibleFrame)")
-            if screen == NSScreen.main {
-                Log.log("[MULTI-MONITOR]   ^ 这是主屏幕")
-            }
-        }
-
-        // 2. 查找 TextEdit
-        Log.log("[MULTI-MONITOR] Step 2: 查找 TextEdit")
-        guard let textEdit = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.TextEdit" }) else {
-            Log.log("[MULTI-MONITOR] ❌ 未找到 TextEdit，请先运行测试脚本")
-            return
-        }
-
-        testTargetApp = textEdit
-        lastFrontmostApp = textEdit
-        Log.log("[MULTI-MONITOR] ✅ 找到 TextEdit")
-
-        // 3. 等待 TextEdit 成为前台应用
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            Log.log("[MULTI-MONITOR] Step 3: 检查 TextEdit 是否在前台")
-            let frontmost = NSWorkspace.shared.frontmostApplication
-            if frontmost?.bundleIdentifier == "com.apple.TextEdit" {
-                Log.log("[MULTI-MONITOR] ✅ TextEdit 在前台")
-            } else {
-                Log.log("[MULTI-MONITOR] ⚠️  TextEdit 不在前台: \(frontmost?.localizedName ?? "unknown")")
-            }
-
-            // 4. 获取光标位置
-            Log.log("[MULTI-MONITOR] Step 4: 获取光标位置")
-            let cursorPoint = self.cursorOrMouseScreenPoint()
-            Log.log("[MULTI-MONITOR] 光标位置: (\(cursorPoint.x), \(cursorPoint.y))")
-
-            // 5. 找到包含光标的屏幕
-            Log.log("[MULTI-MONITOR] Step 5: 查找包含光标的屏幕")
-            let targetScreen = NSScreen.screens.first { screen in
-                screen.frame.contains(cursorPoint)
-            }
-
-            if let screen = targetScreen {
-                let frame = screen.frame
-                Log.log("[MULTI-MONITOR] ✅ 找到目标屏幕: frame=\(frame)")
-
-                // 检查是否是主屏幕
-                if screen == NSScreen.main {
-                    Log.log("[MULTI-MONITOR]   这是主屏幕")
-                } else {
-                    Log.log("[MULTI-MONITOR]   这是副屏幕")
-                }
-            } else {
-                Log.log("[MULTI-MONITOR] ❌ 未找到包含光标的屏幕")
-                Log.log("[MULTI-MONITOR]   尝试检查每个屏幕:")
-                for (index, screen) in NSScreen.screens.enumerated() {
-                    let contains = screen.frame.contains(cursorPoint)
-                    Log.log("[MULTI-MONITOR]   屏幕 \(index): contains=\(contains), frame=\(screen.frame)")
-                }
-            }
-
-            // 6. 模拟识别结果并显示面板
-            Log.log("[MULTI-MONITOR] Step 6: 显示面板")
-            self.accumulatedText = "多显示器测试文字"
-            self.isRecording = false
-
-            // 创建面板
-            self.inputPanel = VoiceInputPanel()
-            self.inputPanel?.onPanelClicked = { [weak self] in
-                self?.handlePanelClicked()
-            }
-            self.inputPanel?.onEditingFinished = { [weak self] text in
-                self?.handleEditingFinished(text)
-            }
-
-            // 显示面板
-            self.inputPanel?.show(near: cursorPoint)
-            self.inputPanel?.updateText(self.accumulatedText)
-
-            // 7. 检查面板位置
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if let panel = self.inputPanel?.panel {
-                    let panelFrame = panel.frame
-                    Log.log("[MULTI-MONITOR] Step 7: 面板已显示")
-                    Log.log("[MULTI-MONITOR] 面板位置: origin=(\(panelFrame.origin.x), \(panelFrame.origin.y)), size=(\(panelFrame.width), \(panelFrame.height))")
-                    Log.log("[MULTI-MONITOR] 面板可见性: \(panel.isVisible)")
-
-                    // 检查面板在哪个屏幕上
-                    let panelCenter = NSPoint(x: panelFrame.midX, y: panelFrame.midY)
-                    let panelScreen = NSScreen.screens.first { screen in
-                        screen.frame.contains(panelCenter)
-                    }
-
-                    if let screen = panelScreen {
-                        Log.log("[MULTI-MONITOR] 面板实际所在屏幕: frame=\(screen.frame)")
-                        if screen == NSScreen.main {
-                            Log.log("[MULTI-MONITOR]   面板在主屏幕上")
-                        } else {
-                            Log.log("[MULTI-MONITOR]   面板在副屏幕上")
-                        }
-
-                        // 对比目标屏幕和实际屏幕
-                        if let target = targetScreen {
-                            if screen == target {
-                                Log.log("[MULTI-MONITOR] ✅✅✅ 面板显示在正确的屏幕上")
-                            } else {
-                                Log.log("[MULTI-MONITOR] ❌ 面板显示在错误的屏幕上")
-                                Log.log("[MULTI-MONITOR]   目标屏幕: \(target.frame)")
-                                Log.log("[MULTI-MONITOR]   实际屏幕: \(screen.frame)")
-                            }
-                        }
-                    } else {
-                        Log.log("[MULTI-MONITOR] ❌ 无法确定面板所在屏幕")
-                    }
-
-                    Log.log("[MULTI-MONITOR] ========== 测试完成 ==========")
-                    Log.log("[MULTI-MONITOR] 请在 TextEdit 所在的显示器上查看面板是否正确显示")
-                }
-            }
-        }
-    }
-
-    /// iTerm2 多显示器测试：模拟在 iTerm2 中按 F5，检查面板是否出现在 iTerm2 所在的显示器
-    private func runITerm2MonitorTest() {
-        Log.log("[ITERM2-TEST] ========== 开始 iTerm2 多显示器测试 ==========")
-
-        // 1. 记录所有屏幕信息
-        let screens = NSScreen.screens
-        Log.log("[ITERM2-TEST] 检测到 \(screens.count) 个屏幕")
-
-        for (index, screen) in screens.enumerated() {
-            let frame = screen.frame
-            let visibleFrame = screen.visibleFrame
-            Log.log("[ITERM2-TEST] 屏幕 \(index): frame=\(frame), visibleFrame=\(visibleFrame)")
-            if screen == NSScreen.main {
-                Log.log("[ITERM2-TEST]   ^ 这是主屏幕")
-            }
-        }
-
-        // 2. 查找 iTerm2
-        Log.log("[ITERM2-TEST] Step 2: 查找 iTerm2")
-        guard let iterm = NSWorkspace.shared.runningApplications.first(where: {
-            $0.bundleIdentifier == "com.googlecode.iterm2"
-        }) else {
-            Log.log("[ITERM2-TEST] ❌ 未找到 iTerm2")
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-                NSApp.terminate(nil)
-            }
-            return
-        }
-        Log.log("[ITERM2-TEST] ✅ 找到 iTerm2")
-
-        // 3. 记录 iTerm2 为目标应用（模拟按 F5 前的状态）
-        lastFrontmostApp = iterm
-        Log.log("[ITERM2-TEST] 已记录 iTerm2 为目标应用")
-
-        // 停止前台应用捕获定时器，避免它覆盖 lastFrontmostApp
-        frontmostCaptureTimer?.cancel()
-        frontmostCaptureTimer = nil
-        Log.log("[ITERM2-TEST] 已停止前台应用捕获定时器")
-
-        // 4. 等待 iTerm2 窗口稳定，然后获取窗口位置
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
-            Log.log("[ITERM2-TEST] Step 3: 检查 iTerm2 窗口位置")
-
-            // 使用 CGWindowListCopyWindowInfo 获取 iTerm2 窗口位置
-            if let pid = iterm.processIdentifier as pid_t? {
-                let options = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
-                if let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] {
-                    for windowInfo in windowList {
-                        if let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? Int32,
-                           ownerPID == pid,
-                           let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
-                           let x = boundsDict["X"],
-                           let y = boundsDict["Y"],
-                           let width = boundsDict["Width"],
-                           let height = boundsDict["Height"] {
-
-                            Log.log("[ITERM2-TEST] iTerm2 窗口位置: (\(x), \(y))")
-                            Log.log("[ITERM2-TEST] iTerm2 窗口大小: (\(width), \(height))")
-
-                            // 检查窗口在哪个屏幕上
-                            let windowCenter = NSPoint(x: x + width / 2, y: y + height / 2)
-                            if let screen = NSScreen.screens.first(where: { $0.frame.contains(windowCenter) }) {
-                                Log.log("[ITERM2-TEST] iTerm2 窗口所在屏幕: frame=\(screen.frame)")
-                                if screen == NSScreen.main {
-                                    Log.log("[ITERM2-TEST]   窗口在主屏幕上")
-                                } else {
-                                    Log.log("[ITERM2-TEST]   窗口在副屏幕上")
-                                }
-                            }
-                            break
-                        }
-                    }
-                }
-            }
-
-            // 5. 获取光标位置（模拟 startRecording 中的调用）
-            Log.log("[ITERM2-TEST] Step 4: 获取光标位置")
-            let cursorPoint = self.cursorOrMouseScreenPoint()
-            Log.log("[ITERM2-TEST] 光标位置: (\(cursorPoint.x), \(cursorPoint.y))")
-
-            // 6. 查找包含光标的屏幕
-            Log.log("[ITERM2-TEST] Step 5: 查找包含光标的屏幕")
-            if let targetScreen = NSScreen.screens.first(where: { $0.frame.contains(cursorPoint) }) {
-                Log.log("[ITERM2-TEST] ✅ 找到目标屏幕: frame=\(targetScreen.frame)")
-                if targetScreen == NSScreen.main {
-                    Log.log("[ITERM2-TEST]   这是主屏幕")
-                } else {
-                    Log.log("[ITERM2-TEST]   这是副屏幕")
-                }
-            } else {
-                Log.log("[ITERM2-TEST] ❌ 未找到包含光标的屏幕，将使用主屏幕")
-            }
-
-            // 7. 显示面板
-            Log.log("[ITERM2-TEST] Step 6: 显示面板")
-            if self.inputPanel == nil {
-                self.inputPanel = VoiceInputPanel()
-            }
-            self.inputPanel?.show(near: cursorPoint)
-
-            // 8. 验证面板位置
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
-                if let panel = self.inputPanel?.panel {
-                    let panelFrame = panel.frame
-                    Log.log("[ITERM2-TEST] Step 7: 面板已显示")
-                    Log.log("[ITERM2-TEST] 面板位置: origin=(\(panelFrame.origin.x), \(panelFrame.origin.y)), size=(\(panelFrame.width), \(panelFrame.height))")
-                    Log.log("[ITERM2-TEST] 面板可见性: \(panel.isVisible)")
-
-                    // 检查面板在哪个屏幕上
-                    let panelCenter = NSPoint(x: panelFrame.midX, y: panelFrame.midY)
-                    if let screen = NSScreen.screens.first(where: { $0.frame.contains(panelCenter) }) {
-                        Log.log("[ITERM2-TEST] 面板实际所在屏幕: frame=\(screen.frame)")
-                        if screen == NSScreen.main {
-                            Log.log("[ITERM2-TEST]   面板在主屏幕上")
-                        } else {
-                            Log.log("[ITERM2-TEST]   面板在副屏幕上")
-                        }
-
-                        // 检查是否与光标所在屏幕一致
-                        if let targetScreen = NSScreen.screens.first(where: { $0.frame.contains(cursorPoint) }) {
-                            if screen.frame == targetScreen.frame {
-                                Log.log("[ITERM2-TEST] ✅✅✅ 面板显示在正确的屏幕上")
-                            } else {
-                                Log.log("[ITERM2-TEST] ❌❌❌ 面板显示在错误的屏幕上！")
-                                Log.log("[ITERM2-TEST]   目标屏幕: \(targetScreen.frame)")
-                                Log.log("[ITERM2-TEST]   实际屏幕: \(screen.frame)")
-                            }
-                        }
-                    } else {
-                        Log.log("[ITERM2-TEST] ❌ 无法确定面板所在屏幕")
-                    }
-
-                    Log.log("[ITERM2-TEST] ========== 测试完成 ==========")
-                    Log.log("[ITERM2-TEST] 请在 iTerm2 所在的显示器上查看面板是否正确显示")
-                    Log.log("[ITERM2-TEST] ")
-                    Log.log("[ITERM2-TEST] 分析：对于终端应用（iTerm2），AX API 可能无法获取文本光标位置")
-                    Log.log("[ITERM2-TEST] 因此会 fallback 到鼠标位置，如果鼠标不在 iTerm2 窗口上，面板会显示在错误的显示器")
-                }
-            }
-        }
-    }
+    // MARK: - 测试功能（见 AppDelegate+Tests.swift）
 }
