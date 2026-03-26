@@ -39,6 +39,55 @@ enum Gzip {
         return out
     }
 
+    /// 解压 gzip 格式的数据
+    static func decompress(_ data: Data) -> Data? {
+        // gzip 最少 10 字节头 + 8 字节尾
+        guard data.count >= 18, data[0] == 0x1f, data[1] == 0x8b else { return nil }
+
+        // 跳过 gzip header（10 字节固定头，可能有额外字段）
+        var offset = 10
+        let flg = data[3]
+        if (flg & 0x04) != 0 { // FEXTRA
+            guard data.count > offset + 2 else { return nil }
+            let xlen = Int(data[offset]) | (Int(data[offset + 1]) << 8)
+            offset += 2 + xlen
+        }
+        if (flg & 0x08) != 0 { // FNAME
+            while offset < data.count && data[offset] != 0 { offset += 1 }
+            offset += 1
+        }
+        if (flg & 0x10) != 0 { // FCOMMENT
+            while offset < data.count && data[offset] != 0 { offset += 1 }
+            offset += 1
+        }
+        if (flg & 0x02) != 0 { offset += 2 } // FHCRC
+
+        guard offset < data.count - 8 else { return nil }
+
+        // 提取 deflate 数据（去掉尾部 8 字节 CRC32 + ISIZE）
+        let deflateData = data.subdata(in: offset..<(data.count - 8))
+
+        // 包装成 zlib 格式（2 字节头 + deflate）给 COMPRESSION_ZLIB 解压
+        var zlibData = Data([0x78, 0x9C])
+        zlibData.append(deflateData)
+
+        let dstCapacity = deflateData.count * 10  // 预估解压后大小
+        var dest = [UInt8](repeating: 0, count: dstCapacity)
+        let scratchSize = compression_decode_scratch_buffer_size(COMPRESSION_ZLIB)
+        var scratch = [UInt8](repeating: 0, count: scratchSize)
+        let written = zlibData.withUnsafeBytes { srcBuf in
+            guard let src = srcBuf.baseAddress else { return 0 }
+            return compression_decode_buffer(
+                &dest, dstCapacity,
+                src, zlibData.count,
+                &scratch,
+                COMPRESSION_ZLIB
+            )
+        }
+        guard written > 0 else { return nil }
+        return Data(dest.prefix(written))
+    }
+
     private static var crcTable: [UInt32] = {
         (0..<256).map { n in
             var c = UInt32(n)

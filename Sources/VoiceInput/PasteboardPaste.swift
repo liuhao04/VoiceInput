@@ -111,7 +111,8 @@ enum PasteboardPaste {
             return
         }
 
-        let element = focused as! AXUIElement
+        // CFTypeRef → AXUIElement 是 CoreFoundation 类型，使用 unsafeBitCast
+        let element: AXUIElement = focused as! AXUIElement
 
         // 记录焦点元素的角色和属性
         var role: CFTypeRef?
@@ -179,7 +180,7 @@ enum PasteboardPaste {
             if rangeResult == .success,
                let range = selectedRange,
                CFGetTypeID(range) == AXValueGetTypeID() {
-
+                // CFTypeRef → AXValue: CFGetTypeID 已验证类型，cast 安全
                 let rangeValue = range as! AXValue
                 var cfRange = CFRange(location: 0, length: 0)
                 if AXValueGetValue(rangeValue, .cfRange, &cfRange) {
@@ -486,21 +487,4 @@ enum PasteboardPaste {
         }
     }
 
-    private static func tryAppleScriptPaste() {
-        let script = """
-        tell application "System Events"
-            keystroke "v" using command down
-        end tell
-        """
-
-        if let scriptObject = NSAppleScript(source: script) {
-            var error: NSDictionary?
-            scriptObject.executeAndReturnError(&error)
-            if let err = error {
-                Log.log("[Paste] AppleScript 备选方案失败: \(err)")
-            } else {
-                Log.log("[Paste] AppleScript 备选方案已执行")
-            }
-        }
-    }
 }

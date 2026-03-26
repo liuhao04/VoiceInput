@@ -164,18 +164,22 @@ addQuery[kSecAttrAccess as String] = access
 ```
 
 **NEVER do:**
-1. **NEVER use `kSecUseDataProtectionKeychain: true`** without a provisioning profile — requires `keychain-access-groups` entitlement → `$(AppIdentifierPrefix)` → provisioning profile → Error 163 without one
+1. **NEVER use `kSecUseDataProtectionKeychain: true`** — without provisioning profile it returns -34018 (`errSecMissingEntitlement`). Verified: even without explicit `kSecAttrAccessGroup`, Data Protection Keychain requires `keychain-access-groups` entitlement → provisioning profile → Error 163 without one.
 2. **NEVER delete old Keychain entries before verifying new write succeeded** — migration code that deletes first then writes can lose user credentials if the write fails (e.g., -34018 errSecMissingEntitlement)
+3. **NEVER use `SecItemUpdate` to fix ACL** — `SecItemUpdate` on an entry with old ACL also triggers the Keychain popup. Instead use read → delete → re-add (only read triggers popup, and only once).
+4. **NEVER use build number in ACL migration key** — Using `keychainACLRefreshed_build_\(build)` causes migration to run on every build. Use a fixed key like `keychainACLFixed_v1` so migration runs only once.
 
-**Migration safety pattern:**
+**Current ACL fix pattern** (in `Config.migrateToKeychainIfNeeded`):
 ```swift
-// CORRECT: Read → Write new → Verify → Delete old
-guard let value = get(forKey: key) else { return }
-let writeStatus = writeToNewLocation(value)
-guard writeStatus == errSecSuccess else { return } // Don't delete if write failed!
-deleteOldEntry(key)
-
-// WRONG: Read → Delete → Write (data loss if write fails!)
+// Fixed key — runs once ever, not per build
+if !UserDefaults.standard.bool(forKey: "keychainACLFixed_v1") {
+    for key in keys {
+        guard let value = get(forKey: key) else { continue }  // may popup once
+        delete(forKey: key)                                     // no popup
+        set(value, forKey: key)                                 // creates with open ACL
+    }
+    UserDefaults.standard.set(true, forKey: "keychainACLFixed_v1")
+}
 ```
 
 ## Karabiner Hotkey Interaction (Lessons Learned)

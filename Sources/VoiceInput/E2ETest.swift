@@ -86,7 +86,7 @@ enum E2ETest {
         let accumulated = NSMutableString()
         let asr = VolcanoASR()
         asr.start(
-            onText: { text in
+            onText: { text, _ in
                 DispatchQueue.main.async { accumulated.setString(text) }
             },
             onError: { err in
@@ -148,7 +148,7 @@ enum E2ETest {
         var audioCapture: AudioCapture?
         let asr = VolcanoASR()
         asr.start(
-            onText: { text in
+            onText: { text, _ in
                 DispatchQueue.main.async { accumulated.setString(text) }
             },
             onError: { err in

@@ -9,7 +9,7 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     private var urlSession: URLSession?
     private var webSocketTask: URLSessionWebSocketTask?
     private let queue = DispatchQueue(label: "com.voiceinput.asr")
-    private var onText: (@Sendable (String) -> Void)?
+    private var onText: (@Sendable (String, Bool) -> Void)?  // (text, isFinal)
     private var onError: (@Sendable (Error) -> Void)?
     private var onReady: (@Sendable () -> Void)?
     private var isRunning = false
@@ -24,7 +24,7 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     private let headerAudioLast: [UInt8] = [0x11, 0x22, 0x00, 0x00]          // 最后一包
     
     func start(
-        onText: @escaping @Sendable (String) -> Void,
+        onText: @escaping @Sendable (String, Bool) -> Void,
         onError: @escaping @Sendable (Error) -> Void,
         onReady: @escaping @Sendable () -> Void
     ) {
@@ -36,6 +36,25 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         connect()
     }
     
+    /// 发送负包（最后一包），但保持连接以接收二遍识别结果
+    func sendLastPacket() {
+        _asrLog("sendLastPacket: 发送负包，等待最终结果")
+        queue.async { [weak self] in
+            self?._sendAudio(Data(), isLast: true)
+        }
+    }
+
+    /// 完全关闭连接
+    func close() {
+        _asrLog("close: 关闭 WebSocket 连接")
+        isRunning = false
+        onError = nil  // 防止关闭时的 socket 错误触发 UI 报错
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+    }
+
+    /// 便捷方法：发送负包后 0.3s 自动关闭连接（用于测试等快速关闭场景）。
+    /// 生产流程使用 sendLastPacket() 等待二遍识别结果后再调 close()。
     func stop() {
         _asrLog("stop")
         isRunning = false
@@ -55,7 +74,14 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     }
     
     private func connect() {
-        var req = URLRequest(url: URL(string: Config.asrWebSocketURL)!)
+        guard let url = URL(string: Config.asrWebSocketURL) else {
+            let err = NSError(domain: "VolcanoASR", code: -1,
+                              userInfo: [NSLocalizedDescriptionKey: "WebSocket URL 无效: \(Config.asrWebSocketURL)"])
+            _asrLog("URL 无效: \(Config.asrWebSocketURL)")
+            onError?(err)
+            return
+        }
+        var req = URLRequest(url: url)
         req.setValue(Config.volcAppId, forHTTPHeaderField: "X-Api-App-Key")
         req.setValue(Config.volcAccessToken, forHTTPHeaderField: "X-Api-Access-Key")
         req.setValue(Config.volcResourceId, forHTTPHeaderField: "X-Api-Resource-Id")
@@ -71,7 +97,7 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     private func sendFullClientRequest() {
         _asrLog("发送 full client request (gzip)")
         guard let task = webSocketTask else { return }
-        let params: [String: Any] = [
+        var params: [String: Any] = [
             "user": [
                 "uid": "voice_input_mac",
                 "did": "mac",
@@ -81,17 +107,29 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
                 "format": "pcm",
                 "rate": 16000,
                 "bits": 16,
-                "channel": 1
+                "channel": 1,
+                "language": "zh-CN"
             ],
             "request": [
                 "model_name": "bigmodel",
                 "enable_itn": true,
                 "enable_punc": true,
-                "boosting_table_id": Config.boostingTableId,
-                "id": Config.replaceWordsId,  // 替换词ID
-                "asr_appid": Config.volcAppId  // 根据文档字幕识别需要此参数
+                "enable_ddc": true,       // 语义顺滑
+                "enable_nonstream": true,  // 二遍识别，提高准确率
+                "end_window_size": 3000   // VAD 判停时间(ms)，默认800，增大以容忍思考停顿
             ]
         ]
+        // corpus 参数：热词表和替换词表（仅在有值时添加）
+        var corpus: [String: Any] = [:]
+        if !Config.boostingTableId.isEmpty {
+            corpus["boosting_table_id"] = Config.boostingTableId
+        }
+        if !Config.replaceWordsId.isEmpty {
+            corpus["correct_table_id"] = Config.replaceWordsId
+        }
+        if !corpus.isEmpty {
+            params["corpus"] = corpus
+        }
         guard let jsonData = try? JSONSerialization.data(withJSONObject: params) else {
             _asrLog("full client request 序列化失败")
             onError?(NSError(domain: "VolcanoASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "首包序列化失败"]))
@@ -161,23 +199,23 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     }
     
     private func receiveLoop() {
-        webSocketTask?.receive { [weak self] result in
-            guard let self = self, self.isRunning else { return }
-            switch result {
-            case .success(let message):
-                switch message {
-                case .data(let data):
-                    self.parseServerResponse(data)
-                case .string:
-                    break
-                @unknown default:
-                    break
+        guard let task = webSocketTask else { return }
+        Task { [weak self] in
+            do {
+                while let self = self, self.isRunning {
+                    let message = try await task.receive()
+                    switch message {
+                    case .data(let data):
+                        self.parseServerResponse(data)
+                    case .string:
+                        break
+                    @unknown default:
+                        break
+                    }
                 }
-                self.receiveLoop()
-            case .failure(let err):
-                if self.isRunning {
-                    self.onError?(err)
-                }
+            } catch {
+                guard let self = self, self.isRunning else { return }
+                self.onError?(error)
             }
         }
     }
@@ -187,6 +225,8 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         let typeAndFlags = data[1]
         let messageType = (typeAndFlags >> 4) & 0x0F
         let flags = typeAndFlags & 0x0F
+        // 检查压缩方式：header 第 4 字节低 4 位，0x01 = gzip
+        let compression = data[3] & 0x0F
 
         // 0x0F = 服务端错误，解析并回调 onError
         if messageType == 0x0F {
@@ -223,12 +263,25 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         let payloadSize = data.subdata(in: offset..<(offset + 4)).withUnsafeBytes { UInt32(bigEndian: $0.load(as: UInt32.self)) }
         let payloadStart = offset + 4
         guard data.count >= payloadStart + Int(payloadSize), payloadSize > 0 else { return }
-        let payload = data.subdata(in: payloadStart..<(payloadStart + Int(payloadSize)))
+        var payload = data.subdata(in: payloadStart..<(payloadStart + Int(payloadSize)))
+
+        // 如果响应是 gzip 压缩的，先解压
+        if compression == 0x01 {
+            guard let decompressed = Gzip.decompress(payload) else {
+                _asrLog("响应 gzip 解压失败")
+                return
+            }
+            payload = decompressed
+        }
+
+        // flags 含义：0x00=无序列号, 0x01=正序列号(一遍), 0x02=最后一包(负包), 0x03=负序列号(二遍)
+        let isNonStreamResult = (flags == 0x03)
+
         if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
            let result = json["result"] as? [String: Any],
            let text = result["text"] as? String, !text.isEmpty {
-            _asrLog("识别结果: \(text.prefix(80))\(text.count > 80 ? "…" : "")")
-            DispatchQueue.main.async { self.onText?(text) }
+            _asrLog("识别结果 (flags=0x\(String(flags, radix: 16)), 二遍=\(isNonStreamResult)): \(text)")
+            DispatchQueue.main.async { self.onText?(text, isNonStreamResult) }
         }
     }
 }

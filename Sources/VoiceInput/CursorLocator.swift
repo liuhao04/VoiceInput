@@ -45,8 +45,10 @@ final class CursorLocator {
             return nil
         }
 
+        // CFTypeRef → AXUIElement: CoreFoundation 桥接类型，cast 始终成功
+        let appElement = app as! AXUIElement
         var focusedElement: CFTypeRef?
-        let elementResult = AXUIElementCopyAttributeValue(app as! AXUIElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
+        let elementResult = AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focusedElement)
         guard elementResult == .success, let element = focusedElement else {
             return nil
         }
@@ -157,8 +159,8 @@ final class CursorLocator {
         var subrole: CFTypeRef?
         let subroleResult = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subrole)
 
-        let roleStr = (roleResult == .success && role != nil) ? (role as! String) : "unknown"
-        let subroleStr = (subroleResult == .success && subrole != nil) ? (subrole as! String) : "none"
+        let roleStr = (roleResult == .success) ? (role as? String ?? "unknown") : "unknown"
+        let subroleStr = (subroleResult == .success) ? (subrole as? String ?? "none") : "none"
 
         return "Role: \(roleStr), Subrole: \(subroleStr)"
     }

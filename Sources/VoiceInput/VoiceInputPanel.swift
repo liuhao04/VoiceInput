@@ -9,8 +9,10 @@ class KeyablePanel: NSPanel {
 class ClickableTextView: NSTextView {
     var onMouseDown: (() -> Void)?
 
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
     override func mouseDown(with event: NSEvent) {
-        Log.log("[Panel] ClickableTextView mouseDown 被调用")
+        Log.log("[Panel] ClickableTextView mouseDown 被调用, shift=\(event.modifierFlags.contains(.shift))")
         onMouseDown?()
         super.mouseDown(with: event)
     }
@@ -21,13 +23,17 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     let panel: KeyablePanel  // 使用自定义的 KeyablePanel
     private let textView: ClickableTextView
     private let scrollView: NSScrollView
-    private let maxWidth: CGFloat = 280
-    private let maxHeight: CGFloat = 120
+    private let maxWidth: CGFloat = 480
+    private let initialHeight: CGFloat = 120
+    private let maxHeight: CGFloat = 480
     private let padding: CGFloat = 10
     private let cornerRadius: CGFloat = 8
+    private var panelShowsAboveCursor = false  // 记录面板在光标上方还是下方
 
     var onPanelClicked: (() -> Void)?
     var onEditingFinished: ((String) -> Void)?
+    var onCancelled: (() -> Void)?
+    private(set) var isEditing = false
     private var savedMainMenu: NSMenu?
 
     override init() {
@@ -43,7 +49,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces]
         panel.hidesOnDeactivate = false
 
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: maxWidth + padding * 2, height: maxHeight + padding * 2))
+        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: maxWidth + padding * 2, height: initialHeight + padding * 2))
         contentView.wantsLayer = true
         contentView.layer?.cornerRadius = cornerRadius
         contentView.layer?.masksToBounds = true
@@ -58,7 +64,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         effectView.layer?.masksToBounds = true
         contentView.addSubview(effectView)
 
-        scrollView = NSScrollView(frame: NSRect(x: padding, y: padding, width: maxWidth, height: maxHeight))
+        scrollView = NSScrollView(frame: NSRect(x: padding, y: padding, width: maxWidth, height: initialHeight))
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
@@ -74,7 +80,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         textView.font = NSFont.systemFont(ofSize: 14, weight: .regular)
         textView.textColor = .labelColor
         textView.textContainerInset = NSSize(width: 8, height: 12)
-        textView.textContainer?.containerSize = NSSize(width: maxWidth - 4, height: .greatestFiniteMagnitude)
+        textView.textContainer?.containerSize = NSSize(width: maxWidth - 16, height: .greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
         textView.minSize = NSSize(width: 0, height: 0)
         textView.maxSize = NSSize(width: maxWidth, height: .greatestFiniteMagnitude)
@@ -101,6 +107,10 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     }
 
     private func handlePanelClick() {
+        if isEditing {
+            Log.log("[Panel] 面板被点击，已在编辑模式，跳过 enterEditMode")
+            return
+        }
         Log.log("[Panel] 面板被点击，进入编辑模式")
         enterEditMode()
         onPanelClicked?()
@@ -109,22 +119,21 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     private func enterEditMode() {
         Log.log("[Panel] enterEditMode: 开始")
 
-        // 允许面板激活
+        isEditing = true
+
+        // 允许面板激活（不添加 .titled，避免出现标题栏条带和 styleMask 切换卡顿）
         panel.styleMask.remove(.nonactivatingPanel)
-        panel.styleMask.insert(.titled)
+
+        // 使文本可编辑（先设置再激活，避免焦点竞争）
+        textView.isEditable = true
 
         // 激活面板并设置为 key window
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
-
-        // 使文本可编辑
-        textView.isEditable = true
-
-        // 强制设置焦点
         panel.makeFirstResponder(textView)
 
-        // 选中所有文本，方便编辑
-        textView.selectAll(nil)
+        // 将光标放到文本末尾
+        textView.setSelectedRange(NSRange(location: textView.string.utf16.count, length: 0))
 
         // 设置临时 Edit 菜单，使 Cmd+C/V/X/A/Z 等快捷键生效
         setupEditMenu()
@@ -133,12 +142,9 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     }
 
     private func exitEditMode() {
-        // 恢复非激活状态
+        isEditing = false
         textView.isEditable = false
-        panel.styleMask.remove(.titled)
         panel.styleMask.insert(.nonactivatingPanel)
-
-        // 恢复之前的菜单
         restoreMainMenu()
     }
 
@@ -177,6 +183,12 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
             onEditingFinished?(text)
             return true
         }
+        if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
+            Log.log("[Panel] 检测到 ESC，取消编辑")
+            exitEditMode()
+            onCancelled?()
+            return true
+        }
         return false
     }
     
@@ -186,7 +198,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         Log.log("[Panel.show] 输入点 (AppKit): (\(screenPoint.x), \(screenPoint.y))")
 
         let margin: CGFloat = 8
-        let size = NSSize(width: maxWidth + padding * 2, height: maxHeight + padding * 2)
+        let size = NSSize(width: maxWidth + padding * 2, height: initialHeight + padding * 2)
 
         // 获取光标所在屏幕的可见区域
         let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) ?? NSScreen.main ?? NSScreen.screens[0]
@@ -196,10 +208,12 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         // 默认在光标下方显示，x 从光标位置开始（不居中）
         var originX = screenPoint.x
         var originY = screenPoint.y - size.height - margin
+        panelShowsAboveCursor = false
 
         // 如果面板底部超出屏幕下边界，改为在光标上方显示
         if originY < visibleFrame.minY {
             originY = screenPoint.y + margin + 34 // 34 是大约一行文字的高度
+            panelShowsAboveCursor = true
             Log.log("[Panel.show] 光标在底部，面板改为上方显示")
         }
 
@@ -233,10 +247,58 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         if textView.string != trimmed {
             textView.string = trimmed
+            resizePanelToFitText()
             if !trimmed.isEmpty {
                 textView.scrollRangeToVisible(NSRange(location: trimmed.utf16.count, length: 0))
             }
         }
+    }
+
+    /// 根据文字内容动态调整面板高度
+    private func resizePanelToFitText() {
+        // 强制排版以获取准确的文字高度
+        textView.layoutManager?.ensureLayout(for: textView.textContainer!)
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+
+        let textHeight = layoutManager.usedRect(for: textContainer).height
+        let insetHeight = textView.textContainerInset.height * 2
+        let contentHeight = textHeight + insetHeight
+
+        // 限制在 initialHeight ~ maxHeight 范围内
+        let targetHeight = min(max(contentHeight, initialHeight), maxHeight)
+        let panelHeight = targetHeight + padding * 2
+
+        let currentFrame = panel.frame
+        let currentPanelHeight = currentFrame.height
+
+        // 高度没变就不刷新
+        if abs(panelHeight - currentPanelHeight) < 1 { return }
+
+        var newOrigin = currentFrame.origin
+        if panelShowsAboveCursor {
+            // 面板在光标上方：底边固定，顶边向上扩展（AppKit 坐标系底边就是 origin.y）
+            // origin.y 不变
+        } else {
+            // 面板在光标下方：顶边固定，底边向下扩展
+            // AppKit 坐标系中 origin 在左下角，顶边 = origin.y + height
+            // 保持顶边不变：newOriginY = oldOriginY + oldHeight - newHeight
+            newOrigin.y = currentFrame.origin.y + currentPanelHeight - panelHeight
+        }
+
+        // 确保不超出屏幕
+        if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: currentFrame.midX, y: currentFrame.midY)) }) ?? NSScreen.main {
+            let visibleFrame = screen.visibleFrame
+            if newOrigin.y < visibleFrame.minY {
+                newOrigin.y = visibleFrame.minY
+            }
+            if newOrigin.y + panelHeight > visibleFrame.maxY {
+                newOrigin.y = visibleFrame.maxY - panelHeight
+            }
+        }
+
+        let newFrame = NSRect(x: newOrigin.x, y: newOrigin.y, width: currentFrame.width, height: panelHeight)
+        panel.setFrame(newFrame, display: true, animate: false)
     }
     
     func hide() {
