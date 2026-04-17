@@ -15,24 +15,52 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 
 ## Build & Install
 
-**Every code change MUST be followed by:**
+项目维护两个完全隔离的版本，从同一份代码构建：
+
+| | Personal 版（个人开发） | Distribution 版（分发） |
+|---|---|---|
+| Bundle ID | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
+| 安装路径 | `~/Applications/VoiceInput Personal.app` | `/Applications/VoiceInput.app`（用户拖拽） |
+| 构建脚本 | `./scripts/build-and-install.sh` | `./scripts/build-dmg.sh` |
+| 菜单栏图标 | mic.fill + 紫色角标 | mic.fill（template，自适配明暗模式） |
+| Keychain service | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
+| UserDefaults domain | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
+| Log file | `~/Library/Logs/VoiceInput Personal.log` | `~/Library/Logs/VoiceInput.log` |
+| TCC 权限 | 独立授权 | 独立授权 |
+| 用途 | 日常自用，每次代码改动后构建 | 发给朋友/公测，公证后分发 |
+
+两个版本可以同时安装、同时运行，互不干扰。
+
+**Personal 版（每次代码改动 MUST 跑这个）：**
 ```bash
 ./scripts/build-and-install.sh
 ```
+1. 自动递增 `CFBundleVersion`
+2. 构建 release，复制到 `~/Applications/VoiceInput Personal.app`
+3. 用 PlistBuddy 把 Bundle ID 改为 `.personal`、显示名改为 `VoiceInput Personal`（不污染源 plist）
+4. 自动用本机 Developer ID Application 证书签名
+5. 如已运行则按路径精确 kill 重启（不影响 distribution 版进程）
 
-This script:
-1. Auto-increments `CFBundleVersion` in `Info.plist`
-2. Builds release binary via `swift build -c release`
-3. Creates app bundle at `~/Applications/VoiceInput.app`
-4. If app is running, kills and relaunches it automatically
+**Distribution 版（要分发时跑）：**
+```bash
+./scripts/build-dmg.sh                 # 签名 + 公证（需要 NOTARIZE_API_KEY_* 环境变量）
+./scripts/build-dmg.sh --skip-notarize # 仅签名
+```
+输出：`dist/VoiceInput-<version>.dmg`，用户双击安装。
+
+**Personal/Distribution 隔离机制：**
+- 代码层：`KeychainHelper.swift` 和 `Logger.swift` 都通过 `Bundle.main.bundleIdentifier` 动态选择服务名/路径
+- 构建层：脚本用 PlistBuddy 修改 Info.plist 副本，不修改源文件
+- 迁移：Personal 版首次启动会从分发版（`com.voiceinput.mac`）一次性拷贝 Keychain 凭证 + UserDefaults 配置，由 `Config.migratePersonalFromDistributionIfNeeded` 实现，标记 key 为 `personalMigratedFromDistribution_v1`
+- 角标渲染：`AppDelegate.isPersonalBuild` 在 `updateStatusIcon()` 中决定是否绘制紫色角标
 
 **Version Display Requirements:**
 - After every build, explicitly tell the user the new version number (e.g., "版本 1.0.0.5 (build 5)")
 - Version is read from `Info.plist`: `CFBundleShortVersionString` + `CFBundleVersion`
 - Version is displayed in the menu bar menu (via `Config.appVersion`)
 
-**Fixed Installation Path:**
-The app MUST always be installed to `~/Applications/VoiceInput.app` to avoid repeated permission prompts (microphone and Accessibility permissions are tied to this specific path).
+**安装路径稳定性：**
+两个版本各自的安装路径 MUST 保持稳定（个人版恒为 `~/Applications/VoiceInput Personal.app`，分发版恒为用户首次拖拽的位置），因为麦克风和 Accessibility 权限绑定到具体路径 + bundle ID。
 
 ## Testing
 
@@ -135,7 +163,7 @@ macOS permissions (Microphone, Accessibility, etc.) are tied to the app's **code
 
 **NEVER do any of the following:**
 
-1. **NEVER use ad-hoc `codesign --sign -`** — This changes the code identity on every build, causing macOS to re-request all permissions. The build script auto-detects the local Apple Development certificate to maintain a stable identity. Set `SIGNING_IDENTITY=none` to skip signing entirely.
+1. **NEVER use ad-hoc `codesign --sign -`** — This changes the code identity on every build, causing macOS to re-request all permissions. The build script auto-detects Developer ID Application certificate (preferred) or Apple Development certificate to maintain a stable identity. Set `SIGNING_IDENTITY=none` to skip signing entirely.
 
 2. **NEVER use `NSWorkspace.shared.open(bundleURL)` to activate apps** — Opening a `.app` bundle URL triggers `kTCCServiceSystemPolicyAppBundles` ("APP管理") permission. Use `app.activate(options: [.activateIgnoringOtherApps])` instead.
 
@@ -189,6 +217,43 @@ When users remap keys with Karabiner Elements:
 2. **Karabiner event sequence**: For Caps Lock → `left_control + right_option` mapping: `rightOption↓ → leftControl↓(~3ms later) → leftControl↑(~135ms later) → rightOption↑ → capsLock events (to_if_alone)`
 3. **Don't use tolerance windows for otherMods detection**: A tolerance window with timer reset allows Karabiner's ~135ms modifier presence to be missed. Use immediate detection: any other modifier during pending = block immediately.
 4. **pendingTriggerTime < 30ms filter**: Still needed to catch extremely fast Karabiner synthetic events that arrive as separate flagsChanged events within microseconds.
+
+## Code Signing & Notarization
+
+**Hardened runtime** is enabled on all builds (`codesign --options runtime`). This is required for Apple notarization but does NOT affect app functionality — VoiceInput uses no JIT, DYLD injection, or unsigned library loading.
+
+**Local builds** (`build-and-install.sh`):
+- Auto-detects signing certificate, preferring `Developer ID Application` over `Apple Development`
+- Override with `SIGNING_IDENTITY` env var, or set to `none` to skip
+- Hardened runtime is always enabled when signing
+
+**CI releases** (`.github/workflows/release.yml`):
+- Imports Developer ID certificate from GitHub Secrets into a temporary keychain
+- Signs app bundle and DMG with hardened runtime
+- Submits to Apple notarization via `notarytool` with App Store Connect API key
+- Staples the notarization ticket to the DMG
+- Falls back to unsigned build if secrets are not configured
+
+**Local notarization** (`scripts/notarize.sh`):
+- Helper script for manually notarizing a DMG
+- Supports API Key auth (recommended) and Apple ID auth
+- Usage: `./scripts/notarize.sh <path-to-dmg>`
+
+**Required GitHub Secrets for CI signing:**
+
+| Secret | Description |
+|---|---|
+| `DEVELOPER_ID_CERTIFICATE_P12` | Base64-encoded .p12 certificate |
+| `DEVELOPER_ID_CERTIFICATE_PASSWORD` | .p12 export password |
+| `NOTARIZE_API_KEY_ID` | App Store Connect API Key ID |
+| `NOTARIZE_API_KEY_ISSUER_ID` | App Store Connect Issuer ID |
+| `NOTARIZE_API_KEY_CONTENT` | Base64-encoded .p8 API key file |
+
+**Entitlements**: `VoiceInput.entitlements` must contain `com.apple.security.device.audio-input = true`. Hardened runtime gates microphone access BEFORE TCC: without this entitlement, `AVCaptureDevice.requestAccess(for: .audio)` returns false in ~20ms silently (no TCC prompt, no DB write). Accessibility (TCC), Keychain (no ACL group), and networking still don't need entitlements. Do NOT add `keychain-access-groups` or App Sandbox entitlements — those require a provisioning profile, which breaks ad-hoc local signing.
+
+**Debugging microphone permission that silently fails:**
+1. Verify entitlement is embedded in the signed bundle (not just in the file): `codesign -d --entitlements - /path/to/app | grep audio-input`
+2. Verify no stale `com.voiceinput.mac` registration with a different TeamID exists in LaunchServices: `lsregister -dump | grep -B1 -A4 voiceinput`. Orphan old-sign apps (e.g. `~/Applications/VoiceInput.app` from before the Personal rename) will conflict with the distribution version sharing the same bundle ID and cause TCC to reject silently. Delete them and unregister with `lsregister -u <path>`.
 
 ## Logging
 

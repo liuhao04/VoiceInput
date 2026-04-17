@@ -87,7 +87,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         setupGlobalHotkey()
         Log.log("全局快捷键已设置，触发键: \(Config.triggerKeys.map { $0.displayName })")
         checkAccessibilityPermission()
-        requestMicPermission()
+        // 麦克风权限不在启动时预请求：LSUIElement（菜单栏常驻）应用从后台调用
+        // AVCaptureDevice.requestAccess，TCC 守护进程会静默吞掉对话框，
+        // 导致权限既未被授予也未被拒绝，用户看不到任何提示。
+        // 改为在用户首次按快捷键录音时走 handleMicPermission，届时 NSApp.activate
+        // 可以把自己提为前台，让 TCC 对话框正常显示。
+        Log.log("麦克风授权状态: \(AVCaptureDevice.authorizationStatus(for: .audio).rawValue) (0=未确定, 1=受限, 2=拒绝, 3=已授权)")
         requestNotificationPermission()
         startFrontmostCaptureTimer()
         Log.log("applicationDidFinishLaunching 结束")
@@ -168,8 +173,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     delegate.otherKeyPressed = true
                 }
                 // 回车键（keyCode 36）在录音中且面板可见时，停止录音并插入文本
+                // 编辑模式下回车由 NSTextView 的 doCommandBy 处理
                 if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 36 {
-                    if delegate.isRecording, delegate.inputPanel?.panel.isVisible == true {
+                    if delegate.isRecording, delegate.inputPanel?.panel.isVisible == true,
+                       delegate.inputPanel?.isEditing != true {
                         Log.log("[Hotkey] 检测到回车键，停止录音并插入文本")
                         DispatchQueue.main.async {
                             delegate.stopRecording()
@@ -177,8 +184,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 }
                 // ESC 键（keyCode 53）：关闭面板，不插入文字
+                // 编辑模式下 ESC 由 NSTextView 的 doCommandBy 处理，这里不重复处理
                 if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 53 {
-                    if delegate.isRecording || delegate.inputPanel?.panel.isVisible == true {
+                    if delegate.inputPanel?.isEditing == true {
+                        // 编辑模式：ESC 由 NSTextView 处理（追加识别取消 / 退出编辑）
+                    } else if delegate.isRecording || delegate.inputPanel?.panel.isVisible == true {
                         Log.log("[Hotkey] 检测到 ESC 键，取消录音")
                         DispatchQueue.main.async {
                             delegate.cancelRecording()
@@ -240,10 +250,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
             guard let self = self, self.pendingTriggerKey != nil else { return }
             self.otherKeyPressed = true
-            Log.log("[Hotkey] NSEvent 全局监听器检测到键盘事件 (keyCode=\(event.keyCode), type=\(event.type == .keyDown ? "keyDown" : "keyUp"))")
-        }
-        if globalKeyMonitor != nil {
-            Log.log("[Hotkey] ✅ NSEvent 全局键盘监听器已创建")
         }
 
         // NSEvent 鼠标监听器：防止 Option+鼠标点击（如终端中移动光标）误触发
@@ -251,10 +257,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             guard let self = self, self.pendingTriggerKey != nil else { return }
             self.otherKeyPressed = true
-            Log.log("[Hotkey] NSEvent 全局监听器检测到鼠标点击, 标记 otherKeyPressed")
-        }
-        if globalMouseMonitor != nil {
-            Log.log("[Hotkey] ✅ NSEvent 全局鼠标监听器已创建")
         }
     }
 
@@ -291,7 +293,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let otherMods = currentDeviceFlags & ~pending.deviceFlag
             if otherMods != 0 {
                 hadOtherModsDuringPending = true
-                Log.log("[Hotkey] pending \(pending.displayName) 期间检测到其他修饰键, otherMods=0x\(String(otherMods, radix: 16))")
             }
         }
 
@@ -310,7 +311,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     // 如果同一个触发键在刚释放后很快又被按下，说明是 BTT 的合成序列，跳过
                     let timeSinceLastRelease = now - lastTriggerReleaseTime
                     if lastReleasedTriggerKey == key && timeSinceLastRelease < 0.5 {
-                        Log.log("[Hotkey] 触发键 \(key.displayName) 在释放后 \(Int(timeSinceLastRelease * 1000))ms 内再次按下, 忽略（BTT 合成序列）")
                         pendingTriggerKey = nil
                         hadOtherModsDuringPending = false
                     } else {
@@ -318,11 +318,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         pendingTriggerTime = now
                         otherKeyPressed = false
                         hadOtherModsDuringPending = false
-                        Log.log("[Hotkey] 触发键 \(key.displayName) 按下, flags=0x\(String(currentDeviceFlags, radix: 16))")
                     }
                 } else {
                     // 有其他修饰键同时按下，不触发
-                    Log.log("[Hotkey] 触发键 \(key.displayName) 按下但有其他修饰键, otherMods=0x\(String(otherModFlags, radix: 16)), 跳过")
                     pendingTriggerKey = nil
                     hadOtherModsDuringPending = false
                 }
@@ -333,57 +331,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let remainingMods = currentDeviceFlags & ~keyFlag
                     if remainingMods == 0 {
                         let holdDuration = now - pendingTriggerTime
-                        if holdDuration < 0.03 {
-                            // 太短（< 30ms）说明是 Karabiner 等工具的合成事件快速闪烁
-                            Log.log("[Hotkey] 触发键 \(key.displayName) 按下时间太短 (\(Int(holdDuration * 1000))ms), 忽略（可能是合成事件）")
-                        } else if otherKeyPressed {
-                            // otherKeyPressed: CGEvent tap 或 NSEvent 全局监听器检测到了键盘事件
-                            Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), 但检测到组合键(eventTap/NSEvent), 跳过")
-                        } else if isAnyNonModifierKeyPressed() {
-                            Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), 但 HID 状态表检测到有键按下, 跳过")
+                        if holdDuration < 0.03 || otherKeyPressed || isAnyNonModifierKeyPressed() {
+                            // 太短/组合键/HID检测到其他键，跳过
                         } else {
-                            // 诊断日志：检查各种 secondsSinceLastEventType 在 BTT 消费事件后是否有用
                             let hidKeyDown = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
                             let hidKeyUp = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
                             let csKeyDown = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
                             let csKeyUp = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-                            Log.log("[Hotkey] 诊断: holdDuration=\(String(format: "%.3f", holdDuration))s, HID keyDown=\(String(format: "%.3f", hidKeyDown))s, HID keyUp=\(String(format: "%.3f", hidKeyUp))s, CS keyDown=\(String(format: "%.3f", csKeyDown))s, CS keyUp=\(String(format: "%.3f", csKeyUp))s")
 
-                            // 核心判断：如果在 hold 期间有任何 keyDown 或 keyUp 发生，说明有组合键
                             let hadKeyEventDuringHold = hidKeyDown < holdDuration || hidKeyUp < holdDuration || csKeyDown < holdDuration || csKeyUp < holdDuration
-                            if hadKeyEventDuringHold {
-                                Log.log("[Hotkey] 触发键 \(key.displayName) 释放 (\(Int(holdDuration * 1000))ms), secondsSince 检测到期间有键盘事件, 跳过")
-                            } else {
+                            if !hadKeyEventDuringHold {
                                 let triggerKeyName = key.displayName
                                 let isRec = isRecording
                                 let pendingStart = pendingTriggerTime
-                                Log.log("[Hotkey] 触发键 \(triggerKeyName) 预备触发 (\(Int(holdDuration * 1000))ms), 延迟50ms确认, isRecording=\(isRec)")
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                                     guard let self = self else { return }
-                                    if self.otherKeyPressed {
-                                        Log.log("[Hotkey] 延迟确认：检测到组合键(50ms内收到键盘事件), 取消触发")
-                                    } else if self.isAnyNonModifierKeyPressed() {
-                                        Log.log("[Hotkey] 延迟确认：HID 状态表检测到有键按下, 取消触发")
-                                    } else {
-                                        // 延迟后再查一次
-                                        let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
-                                        let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
-                                        let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
-                                        let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
-                                        let dCsKU = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-                                        let hadKeyEventDelayed = dHidKD < totalElapsed || dHidKU < totalElapsed || dCsKD < totalElapsed || dCsKU < totalElapsed
-                                        if hadKeyEventDelayed {
-                                            Log.log("[Hotkey] 延迟确认：secondsSince 检测到期间有键盘事件 (HID kd=\(String(format: "%.3f", dHidKD))s ku=\(String(format: "%.3f", dHidKU))s CS kd=\(String(format: "%.3f", dCsKD))s ku=\(String(format: "%.3f", dCsKU))s elapsed=\(String(format: "%.3f", totalElapsed))s), 取消触发")
-                                        } else {
-                                            Log.log("[Hotkey] 触发键 \(triggerKeyName) 确认单独按下并释放, isRecording=\(isRec)")
-                                            self.toggleRecording()
-                                        }
+                                    if self.otherKeyPressed || self.isAnyNonModifierKeyPressed() {
+                                        return
+                                    }
+                                    let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
+                                    let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+                                    let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
+                                    let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+                                    let dCsKU = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+                                    let hadKeyEventDelayed = dHidKD < totalElapsed || dHidKU < totalElapsed || dCsKD < totalElapsed || dCsKU < totalElapsed
+                                    if !hadKeyEventDelayed {
+                                        Log.log("[Hotkey] 触发键 \(triggerKeyName) 确认触发, isRecording=\(isRec)")
+                                        self.toggleRecording()
                                     }
                                 }
                             }
                         }
                     } else {
-                        Log.log("[Hotkey] 触发键 \(key.displayName) 释放但仍有其他修饰键, remainingMods=0x\(String(remainingMods, radix: 16))")
                     }
                 }
                 // 记录释放时间和释放的键，用于检测 BTT 快速释放-重按序列
@@ -453,15 +432,43 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 5), in: sender)
     }
 
-    /// 菜单栏图标：始终使用 mic.fill，录音时右上角叠加红色圆点
+    /// Personal 版（个人开发版）的标识：bundle ID 以 .personal 结尾
+    private static let isPersonalBuild: Bool = {
+        (Bundle.main.bundleIdentifier ?? "").hasSuffix(".personal")
+    }()
+
+    /// 菜单栏图标：mic.fill；录音时为橙色；Personal 版右上角叠加紫色圆点（始终可见）
     func updateStatusIcon() {
         guard let button = statusItem?.button else { return }
         button.title = ""
 
         guard let micImage = NSImage(systemSymbolName: "mic.fill", accessibilityDescription: "语音输入") else { return }
 
-        if isRecording {
-            // 录音中：用柔和的橙色绘制同一个图标
+        if Self.isPersonalBuild {
+            // Personal 版：自渲染（带紫色角标），不能用 template
+            let recording = isRecording
+            let composed = NSImage(size: micImage.size, flipped: false) { rect in
+                let baseColor: NSColor = recording ? .systemOrange : .labelColor
+                micImage.draw(in: rect)
+                baseColor.setFill()
+                rect.fill(using: .sourceAtop)
+
+                // 右上角紫色圆点
+                let dotSize = rect.width * 0.4
+                let dotRect = NSRect(
+                    x: rect.width - dotSize,
+                    y: rect.height - dotSize,
+                    width: dotSize,
+                    height: dotSize
+                )
+                NSColor.systemPurple.setFill()
+                NSBezierPath(ovalIn: dotRect).fill()
+                return true
+            }
+            composed.isTemplate = false
+            button.image = composed
+        } else if isRecording {
+            // 分发版录音中：橙色
             let tinted = NSImage(size: micImage.size, flipped: false) { rect in
                 micImage.draw(in: rect)
                 NSColor.systemOrange.setFill()
@@ -471,6 +478,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             tinted.isTemplate = false
             button.image = tinted
         } else {
+            // 分发版空闲：template（自动适配深色/浅色）
             micImage.isTemplate = true
             button.image = micImage
         }
@@ -554,26 +562,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func requestMicPermission() {
-        let status = AVCaptureDevice.authorizationStatus(for: .audio)
-        Log.log("麦克风授权状态: \(status.rawValue) (0=未确定, 1=受限, 2=拒绝, 3=已授权)")
-        switch status {
+    /// 麦克风权限未授予时的处理：
+    /// - notDetermined：先 NSApp.activate 把 LSUIElement app 提为前台，再调 requestAccess；
+    ///   granted 则重新进入录音流程，denied 则弹设置引导框。
+    /// - denied/restricted：直接弹设置引导框，提供"打开系统设置"按钮。
+    ///
+    /// 为什么必须 activate：菜单栏常驻 app（LSUIElement=true）在后台触发
+    /// TCC 权限对话框，系统会静默吞掉、不向用户展示，表现为 requestAccess
+    /// 立刻返回 false。
+    private func handleMicPermission(currentStatus: AVAuthorizationStatus) {
+        switch currentStatus {
         case .notDetermined:
-            Log.log("请求麦克风权限...")
-            AVCaptureDevice.requestAccess(for: .audio) { granted in
-                Log.log("麦克风权限请求结果: \(granted)")
-                if granted {
-                    Log.log("✅ 麦克风权限已授权")
-                } else {
-                    Log.log("❌ 麦克风权限被拒绝")
+            Log.log("麦克风权限未确定，请求中")
+            AVCaptureDevice.requestAccess(for: .audio) { [weak self] granted in
+                DispatchQueue.main.async {
+                    Log.log("麦克风权限请求结果: \(granted)")
+                    if granted {
+                        self?.startRecording()
+                    } else {
+                        self?.showMicPermissionDeniedAlert()
+                    }
                 }
             }
         case .denied, .restricted:
-            Log.log("⚠️ 麦克风权限被拒绝或受限，录音将无法工作")
-        case .authorized:
-            Log.log("✅ 麦克风权限已授权")
-        @unknown default:
+            Log.log("⚠️ 麦克风权限已拒绝，引导用户去系统设置")
+            showMicPermissionDeniedAlert()
+        default:
             break
+        }
+    }
+
+    private func showMicPermissionDeniedAlert() {
+        DispatchQueue.main.async {
+            NSApp.activate(ignoringOtherApps: true)
+            let alert = NSAlert()
+            alert.messageText = "需要麦克风权限"
+            alert.informativeText = "VoiceInput 需要麦克风权限才能识别语音。\n请在 系统设置 → 隐私与安全性 → 麦克风 中打开 VoiceInput 的开关，然后重启 app。"
+            alert.alertStyle = .warning
+            alert.addButton(withTitle: "打开系统设置")
+            alert.addButton(withTitle: "稍后")
+            if alert.runModal() == .alertFirstButtonReturn {
+                if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+                    NSWorkspace.shared.open(url)
+                }
+            }
         }
     }
 
@@ -635,16 +667,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc func toggleRecording() {
         let now = CFAbsoluteTimeGetCurrent()
         let elapsed = now - lastToggleTime
-        Log.log("toggleRecording 被调用, isRecording=\(isRecording), 距上次=\(String(format: "%.3f", elapsed))s")
 
         // 防抖：300ms 内不允许再次触发（防止 Karabiner 等工具的快速连续事件）
         if elapsed < 0.3 {
-            Log.log("toggleRecording: 防抖忽略（距上次 \(String(format: "%.0f", elapsed * 1000))ms）")
             return
         }
         lastToggleTime = now
 
-        // 编辑模式下按 Option：等同于回车，结束编辑并插入文字
+        // 编辑模式下按触发键：确认插入（和回车一样）
         if inputPanel?.isEditing == true {
             let text = inputPanel?.getCurrentText() ?? ""
             inputPanel?.exitEditModeForTesting()
@@ -660,8 +690,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startRecording() {
+        // 麦克风权限门禁：未授权直接转给 handleMicPermission 处理（弹请求/引导框）
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micStatus != .authorized {
+            handleMicPermission(currentStatus: micStatus)
+            return
+        }
+
         Log.log("startRecording 开始, inputPanel==nil: \(inputPanel == nil)")
         accumulatedText = ""
+        lastStreamingResultTime = 0
         isRecording = true
         updateStatusIcon()
 
@@ -674,23 +712,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if inputPanel == nil {
             inputPanel = VoiceInputPanel()
-            // 点击面板时停止录音并进入编辑模式
+            // 点击面板文字区：停止录音进入编辑模式
             inputPanel?.onPanelClicked = { [weak self] in
                 self?.handlePanelClicked()
             }
-            // 编辑完成按回车时插入文本
+            // 编辑完成按回车/触发键时插入文本
             inputPanel?.onEditingFinished = { [weak self] text in
                 self?.handleEditingFinished(text)
             }
-            // ESC 取消编辑
+            // 录音中 ESC：取消录音
             inputPanel?.onCancelled = { [weak self] in
                 self?.cancelRecording()
+            }
+            // 编辑模式 ESC：取消但记录历史
+            inputPanel?.onEditingCancelled = { [weak self] in
+                self?.handleEditingCancelled()
+            }
+            // 点击"继续识别"按钮：从光标处恢复录音
+            inputPanel?.onContinueRecording = { [weak self] in
+                self?.handleContinueRecording()
             }
         }
         let point = cursorOrMouseScreenPoint()
         inputPanel?.show(near: point)
-        Log.log("startRecording: 面板已调用 show, panel.isVisible=\(inputPanel?.panel.isVisible ?? false)")
-
         asr = VolcanoASR()
         asr?.start(
             onText: { text, isFinal in
@@ -704,43 +748,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self?.stopRecordingAndShowError(msg)
                 }
             },
-            onReady: {
-                Log.log("ASR 连接就绪，缓冲的音频将开始发送")
-            }
+            onReady: {}
         )
-        // 立即开麦：音频在 ASR 侧排队，连接就绪后会先发缓冲再收实时流，避免丢失按键后开头几句
         startAudioCapture()
-        Log.log("startRecording 结束（已开麦，ASR 连接就绪后会自动发送缓冲）")
     }
 
     private func startAudioCapture() {
         guard isRecording, audioCapture == nil else { return }
-        Log.log("准备启动音频捕获...")
 
-        // 在后台线程中初始化 AudioCapture，因为 AVAudioEngine().inputNode 可能会阻塞
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            guard let self = self else { return }
-
-            Log.log("后台线程：创建 AudioCapture...")
-            let capture = AudioCapture()
-
-            do {
-                Log.log("后台线程：启动 AudioCapture...")
-                try capture.start { [weak self] pcm in
-                    self?.asr?.sendPCM(pcm)
-                }
-
-                DispatchQueue.main.async {
-                    self.audioCapture = capture
-                    Log.log("音频捕获已启动")
-                }
-            } catch {
-                Log.log("麦克风启动失败: \(error)")
-                DispatchQueue.main.async {
-                    self.showError("麦克风启动失败: \(error.localizedDescription)")
-                    self.stopRecording()
-                }
+        // AVAudioEngine 推荐在主线程操作；且后台启动会与快速 stop 产生竞态：
+        // 启动期间用户若按下 F5 停止，stopRecording 看到 audioCapture==nil 无法 stop，
+        // 启动完成后赋值出一个孤儿 capture（麦克风一直开着，且下次 start 因 !=nil 被跳过）。
+        let capture = AudioCapture()
+        do {
+            try capture.start { [weak self] pcm in
+                self?.asr?.sendPCM(pcm)
             }
+            audioCapture = capture
+        } catch {
+            Log.log("❌ 麦克风启动失败: \(error)")
+            showError("麦克风启动失败: \(error.localizedDescription)")
+            stopRecording()
         }
     }
 
@@ -764,11 +792,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 等待二遍识别的超时定时器
     private var finalResultTimer: DispatchWorkItem?
+    /// 录音中一遍识别结果间隔检测：超过阈值没有新结果则显示动态点
+    private var streamingIdleTimer: DispatchWorkItem?
+    /// 动态点自动停止 timer：显示动态点后若长时间无新结果则自动停止
+    private var dotsAutoStopTimer: DispatchWorkItem?
+    /// 上一次收到一遍识别结果的时间戳
+    private var lastStreamingResultTime: CFAbsoluteTime = 0
 
     private func stopRecording() {
         Log.log("stopRecording 开始, accumulatedText 长度=\(accumulatedText.count)")
         isRecording = false
         updateStatusIcon()
+
+        // 取消录音中空闲检测 timer
+        streamingIdleTimer?.cancel()
+        streamingIdleTimer = nil
+        dotsAutoStopTimer?.cancel()
+        dotsAutoStopTimer = nil
 
         // 停止音频捕获
         audioCapture?.stop()
@@ -787,7 +827,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // 发送负包，但保持连接等待二遍识别结果
         asr?.sendLastPacket()
 
-        // 面板保持显示当前文本，等待二遍结果更新
+        // 显示动态等待点，提示用户正在等待二遍识别
+        // 先停掉录音期间可能残留的动态点，再重新启动
+        inputPanel?.hideWaitingDots()
+        inputPanel?.showWaitingDots()
 
         // 设置超时：最多等 2 秒，超时后使用当前结果自动插入
         let timeout = DispatchWorkItem { [weak self] in
@@ -805,6 +848,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func finishAndInsertText() {
         finalResultTimer?.cancel()
         finalResultTimer = nil
+
+        // 停止等待动画
+        inputPanel?.hideWaitingDots()
 
         asr?.close()
         asr = nil
@@ -845,40 +891,69 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accumulatedText = replaced
         // 安全检查：如果正在录音但面板不可见，重新显示
         if isRecording, let panel = inputPanel, !panel.panel.isVisible {
-            Log.log("[安全恢复] 面板在录音中不可见，重新显示")
-            let point = cursorOrMouseScreenPoint()
+                let point = cursorOrMouseScreenPoint()
             panel.show(near: point)
         }
-        inputPanel?.updateText(replaced)
+        // 收到新结果时停止动态点
+        inputPanel?.hideWaitingDots()
+        dotsAutoStopTimer?.cancel()
+        dotsAutoStopTimer = nil
+        inputPanel?.insertOrReplaceASRText(replaced)
 
         // 收到二遍识别最终结果（flags=0x03），自动插入
         if isFinal && !isRecording && finalResultTimer != nil {
             Log.log("收到二遍识别最终结果，自动插入")
             finishAndInsertText()
+            return
         }
+
+        if isRecording {
+            let now = CFAbsoluteTimeGetCurrent()
+            let gap = now - lastStreamingResultTime
+            lastStreamingResultTime = now
+            if gap < 2.0 {
+                // 密集流式结果（正在说话）：启动空闲 timer，停顿后显示动态点
+                resetStreamingIdleTimer()
+            } else {
+                // 回溯修正结果（长间隔后到达）：结果已稳定，不再启动 timer
+                streamingIdleTimer?.cancel()
+                streamingIdleTimer = nil
+            }
+        } else if finalResultTimer != nil {
+            // 已停止录音但还在等二遍结果：在途一遍结果到达后恢复动态点
+            inputPanel?.showWaitingDots()
+        }
+    }
+
+    /// 重置录音中空闲检测 timer：800ms 没有新一遍结果则显示动态点
+    private func resetStreamingIdleTimer() {
+        streamingIdleTimer?.cancel()
+        dotsAutoStopTimer?.cancel()
+        let idle = DispatchWorkItem { [weak self] in
+            guard let self = self, self.isRecording else { return }
+            self.inputPanel?.showWaitingDots()
+            // 显示动态点后，最多再等 4 秒（回溯修正通常在 2.5-4.7s 内到达）
+            // 超时则认为结果已稳定，自动停止动态点
+            let autoStop = DispatchWorkItem { [weak self] in
+                guard let self = self, self.isRecording else { return }
+                self.inputPanel?.hideWaitingDots()
+            }
+            self.dotsAutoStopTimer = autoStop
+            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: autoStop)
+        }
+        streamingIdleTimer = idle
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: idle)
     }
 
     /// 返回面板显示位置：优先使用文本光标位置，失败则使用鼠标位置
     func cursorOrMouseScreenPoint() -> NSPoint {
-        Log.log("[cursorOrMouseScreenPoint] 开始获取光标位置")
-
-        // 方法1: 使用 CursorLocator 精确获取输入光标位置
         if let cursorPos = CursorLocator.getCursorPosition() {
-            Log.log("[cursorOrMouseScreenPoint] ✓ 成功获取输入光标位置: (\(cursorPos.x), \(cursorPos.y))")
-            if let info = CursorLocator.getFocusedElementInfo() {
-                Log.log("[cursorOrMouseScreenPoint]   焦点元素: \(info)")
-            }
             return cursorPos
         }
 
-        Log.log("[cursorOrMouseScreenPoint] 无法获取输入光标，尝试窗口位置")
-
-        // 方法2: Fallback 到窗口位置
         let targetApp = lastFrontmostApp ?? NSWorkspace.shared.frontmostApplication
         if let frontmostApp = targetApp,
            let pid = frontmostApp.processIdentifier as pid_t? {
-            let appName = frontmostApp.localizedName ?? "unknown"
-            Log.log("[cursorOrMouseScreenPoint] 目标应用: \(appName)")
 
             let appElement = AXUIElementCreateApplication(pid)
 
@@ -899,7 +974,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         let screenHeight = NSScreen.screens.first?.frame.height ?? 982
                         let appKitCenterY = screenHeight - (frame.origin.y + frame.size.height / 2)
                         let windowCenter = NSPoint(x: frame.origin.x + frame.size.width / 2, y: appKitCenterY)
-                        Log.log("[cursorOrMouseScreenPoint] ✓ 窗口中心位置 (AppKit): (\(windowCenter.x), \(windowCenter.y))")
                         return windowCenter
                     }
                 }
@@ -920,7 +994,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                         let screenHeight = NSScreen.screens.first?.frame.height ?? 982
                         let appKitCenterY = screenHeight - (y + height / 2)
                         let windowCenter = NSPoint(x: x + width / 2, y: appKitCenterY)
-                        Log.log("[cursorOrMouseScreenPoint] ✓ 窗口中心 (CGWindow, AppKit): (\(windowCenter.x), \(windowCenter.y))")
                         return windowCenter
                     }
                 }
@@ -928,16 +1001,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         // Fallback: 使用鼠标位置
-        let mousePoint = NSEvent.mouseLocation
-        Log.log("[cursorOrMouseScreenPoint] Fallback: 使用鼠标位置 (\(mousePoint.x), \(mousePoint.y))")
-        return mousePoint
+        return NSEvent.mouseLocation
     }
 
     /// 出错时先停止录音释放麦克风，再弹窗（避免弹窗期间一直占麦）
     private func stopRecordingAndShowError(_ message: String) {
         // 非录音状态下的错误（如关闭连接时的 socket 错误）不弹窗
         guard isRecording else {
-            Log.log("stopRecordingAndShowError: 非录音状态，忽略错误: \(message)")
             return
         }
         stopRecording()
@@ -967,11 +1037,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     /// 点击面板时：停止录音和识别，进入编辑模式
     func handlePanelClicked() {
-        Log.log("handlePanelClicked: 停止录音和识别")
 
         // 保存当前的目标应用，防止编辑过程中被定时器更新
         editModeTargetApp = testTargetApp ?? lastFrontmostApp
-        Log.log("handlePanelClicked: 保存目标应用 = \(editModeTargetApp?.localizedName ?? "nil") (\(editModeTargetApp?.bundleIdentifier ?? "nil"))")
 
         isRecording = false
         updateStatusIcon()
@@ -984,7 +1052,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         asr?.stop()
         asr = nil
 
-        // 保留面板和当前文本，等待编辑
+        // 进入编辑模式
+        inputPanel?.enterEditMode()
     }
 
     /// 编辑完成后按回车时：插入文本到目标应用
@@ -993,6 +1062,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Log.log("handleEditingFinished: editModeTargetApp = \(editModeTargetApp?.localizedName ?? "nil") (\(editModeTargetApp?.bundleIdentifier ?? "nil"))")
         Log.log("handleEditingFinished: lastFrontmostApp = \(lastFrontmostApp?.localizedName ?? "nil") (\(lastFrontmostApp?.bundleIdentifier ?? "nil"))")
         Log.log("handleEditingFinished: testTargetApp = \(testTargetApp?.localizedName ?? "nil") (\(testTargetApp?.bundleIdentifier ?? "nil"))")
+
+        // 编辑模式下 VoiceInput 是前台应用，隐藏面板后 macOS 会激活下一个可见的 VoiceInput 窗口
+        // 如果历史记录窗口处于打开状态，就会闪现。所以先将其隐藏。
+        HistoryWindow.shared.orderOutIfVisible()
 
         // 隐藏面板
         inputPanel?.hide()
@@ -1022,6 +1095,65 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         } else {
             Log.log("文本为空，不插入")
         }
+    }
+
+    /// 编辑模式 ESC：取消插入，但记录识别结果到历史
+    func handleEditingCancelled() {
+        Log.log("handleEditingCancelled: 取消插入，记录历史")
+
+        HistoryWindow.shared.orderOutIfVisible()
+
+        let panelText = inputPanel?.getCurrentText() ?? ""
+        inputPanel?.hide()
+        inputPanel = nil
+
+        // 不插入文字到目标应用，但记录到历史中
+        let trimmed = panelText.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty {
+            let target = editModeTargetApp ?? testTargetApp ?? lastFrontmostApp
+            let appName = target?.localizedName ?? "未知"
+            let originalText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            RecognitionHistory.append(text: trimmed, app: appName, originalText: originalText)
+            Log.log("handleEditingCancelled: 已记录到历史，文本长度=\(trimmed.count)")
+        }
+
+        editModeTargetApp = nil
+    }
+
+    /// "继续识别"按钮：从编辑模式恢复录音，ASR 结果插入到当前光标位置
+    private func handleContinueRecording() {
+        // 麦克风权限门禁（与 startRecording 入口一致）
+        let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+        if micStatus != .authorized {
+            handleMicPermission(currentStatus: micStatus)
+            return
+        }
+
+        Log.log("handleContinueRecording: 从编辑模式恢复录音")
+
+        // 记录光标位置并退出编辑模式（但保留面板）
+        inputPanel?.prepareForContinueRecording()
+
+        // 重新开始录音
+        isRecording = true
+        updateStatusIcon()
+
+        asr = VolcanoASR()
+        asr?.start(
+            onText: { text, isFinal in
+                DispatchQueue.main.async {
+                    (NSApp.delegate as? AppDelegate)?.appendRecognizedText(text, isFinal: isFinal)
+                }
+            },
+            onError: { [weak self] err in
+                let msg = err.localizedDescription
+                DispatchQueue.main.async {
+                    self?.stopRecordingAndShowError(msg)
+                }
+            },
+            onReady: {}
+        )
+        startAudioCapture()
     }
 
     // MARK: - 测试功能（见 AppDelegate+Tests.swift）
