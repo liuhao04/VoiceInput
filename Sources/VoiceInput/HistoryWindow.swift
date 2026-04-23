@@ -29,6 +29,7 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
 
     func show() {
         if let w = window {
+            refreshToLatest()
             w.makeKeyAndOrderFront(nil)
             NSApp.activate(ignoringOtherApps: true)
             return
@@ -65,6 +66,19 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         datePopup.target = self
         datePopup.action = #selector(dateChanged)
         topBar.addSubview(datePopup)
+
+        // 右上角刷新按钮：重新加载、跳回最新月份整月
+        let refreshButton = NSButton(
+            image: NSImage(systemSymbolName: "arrow.clockwise",
+                           accessibilityDescription: "刷新") ?? NSImage(),
+            target: self,
+            action: #selector(refreshClicked)
+        )
+        refreshButton.bezelStyle = .rounded
+        refreshButton.frame = NSRect(x: windowWidth - 50, y: 6, width: 36, height: 28)
+        refreshButton.autoresizingMask = [.minXMargin]
+        refreshButton.toolTip = "刷新（回到初始视图，显示最新识别结果）"
+        topBar.addSubview(refreshButton)
 
         // 底部：记录数统计
         countLabel = NSTextField(labelWithString: "")
@@ -227,6 +241,19 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         loadSelectedDate()
     }
 
+    /// 重载月份列表 + 跳到最新月份整月（供 show 复用窗口时 / 刷新按钮使用）
+    private func refreshToLatest() {
+        reloadDateOptions()
+        if datePopup.numberOfItems > 0 {
+            datePopup.selectItem(at: 0)
+            loadSelectedDate()
+        }
+    }
+
+    @objc private func refreshClicked() {
+        refreshToLatest()
+    }
+
     @objc private func columnResized(_ notification: Notification) {
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(refreshRowHeights), object: nil)
         perform(#selector(refreshRowHeights), with: nil, afterDelay: 0.05)
@@ -338,6 +365,12 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
             options: [.usesLineFragmentOrigin, .usesFontLeading]
         )
         return ceil(rect.height)
+    }
+
+    /// 临时隐藏窗口（不销毁），防止在应用切换时闪现
+    func orderOutIfVisible() {
+        guard let w = window, w.isVisible else { return }
+        w.orderOut(nil)
     }
 
     // MARK: - NSWindowDelegate

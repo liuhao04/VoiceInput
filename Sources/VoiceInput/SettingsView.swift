@@ -6,12 +6,16 @@ struct SettingsView: View {
     // MARK: - State
 
     @State private var triggerKeys: Set<TriggerKey> = Config.triggerKeys
+    @State private var triggerActivation: TriggerActivation = Config.triggerActivation
+    @State private var customBindings: [HotkeyBinding] = Config.customTriggerBindings
+    @State private var pendingNewCustomBinding: HotkeyBinding? = nil
+    @State private var pasteLastBinding: HotkeyBinding? = Config.pasteLastHotkey
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
 
     @State private var volcAppId: String = Config.volcAppId
     @State private var volcAccessToken: String = Config.volcAccessToken
     @State private var volcResourceId: String = Config.volcResourceId
-    @State private var asrWebSocketURL: String = Config.asrWebSocketURL
+    @State private var asrMode: ASRMode = Config.asrMode
     @State private var boostingTableId: String = Config.boostingTableId
 
     @State private var replaceRulesFilePath: String = Config.replaceRulesFilePath
@@ -27,6 +31,8 @@ struct SettingsView: View {
     @State private var validationError: String? = nil
 
     var onClose: (() -> Void)? = nil
+    var onPasteLastHotkeyChanged: (() -> Void)? = nil
+    var onCustomTriggerBindingsChanged: (() -> Void)? = nil
     var initialTab: Int = 0
 
     private let labelWidth: CGFloat = 120
@@ -45,7 +51,7 @@ struct SettingsView: View {
                 .tabItem { Label("词语替换", systemImage: "arrow.left.arrow.right") }
                 .tag(2)
         }
-        .frame(width: 560, height: 420)
+        .frame(width: 560, height: 520)
         .onAppear { selectedTab = initialTab }
         .sheet(isPresented: $showingAddRule) {
             addRuleSheet
@@ -55,43 +61,157 @@ struct SettingsView: View {
     // MARK: - Tab 1: 通用
 
     private var generalTab: some View {
-        VStack(alignment: .leading, spacing: 20) {
-            // 开机自启动
-            sectionHeader("启动")
-            Toggle("开机自启动", isOn: $launchAtLogin)
-                .onChange(of: launchAtLogin) { newValue in
-                    toggleLaunchAtLogin(newValue)
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                // 开机自启动
+                sectionHeader("启动")
+                Toggle("开机自启动", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { newValue in
+                        toggleLaunchAtLogin(newValue)
+                    }
+                    .padding(.leading, 4)
+
+                Divider()
+
+                // 触发键
+                HStack {
+                    sectionHeader("触发键（单独按下触发语音输入）")
+                    Spacer()
+                    Picker("", selection: $triggerActivation) {
+                        ForEach(TriggerActivation.allCases, id: \.rawValue) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(width: 90)
+                    .onChange(of: triggerActivation) { newValue in
+                        Config.triggerActivation = newValue
+                        Log.log("[Settings] 触发方式已更新: \(newValue.displayName)")
+                    }
+                }
+
+                LazyVGrid(columns: [
+                    GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())
+                ], alignment: .leading, spacing: 6) {
+                    ForEach(TriggerKey.allCases, id: \.rawValue) { key in
+                        Toggle(key.displayName, isOn: Binding(
+                            get: { triggerKeys.contains(key) },
+                            set: { isOn in
+                                if isOn {
+                                    triggerKeys.insert(key)
+                                } else if triggerKeys.count > 1 || !customBindings.isEmpty {
+                                    triggerKeys.remove(key)
+                                }
+                                Config.triggerKeys = triggerKeys
+                                Log.log("[Settings] 触发键已更新: \(triggerKeys.map { $0.displayName })")
+                            }
+                        ))
+                        .toggleStyle(.checkbox)
+                    }
                 }
                 .padding(.leading, 4)
 
-            Divider()
-
-            // 触发键
-            sectionHeader("触发键（单独按下触发语音输入）")
-            LazyVGrid(columns: [
-                GridItem(.flexible()), GridItem(.flexible()), GridItem(.flexible())
-            ], alignment: .leading, spacing: 6) {
-                ForEach(TriggerKey.allCases, id: \.rawValue) { key in
-                    Toggle(key.displayName, isOn: Binding(
-                        get: { triggerKeys.contains(key) },
-                        set: { isOn in
-                            if isOn {
-                                triggerKeys.insert(key)
-                            } else if triggerKeys.count > 1 {
-                                triggerKeys.remove(key)
+                // 自定义触发键：内联录入（支持单修饰键或组合键如 ⌘⇧A）
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 10) {
+                        Text("自定义触发键:").font(.system(size: 12))
+                        HotkeyRecorderView(
+                            binding: $pendingNewCustomBinding,
+                            mode: .trigger,
+                            placeholder: "点击录入（单修饰键或组合键）",
+                            onChange: { commitPendingCustomBinding() }
+                        )
+                        Spacer()
+                    }
+                    if !customBindings.isEmpty {
+                        HStack(spacing: 6) {
+                            ForEach(Array(customBindings.enumerated()), id: \.offset) { idx, b in
+                                HStack(spacing: 2) {
+                                    Text(b.displayName).font(.system(size: 12))
+                                    Button(action: { removeCustomBinding(at: idx) }) {
+                                        Image(systemName: "xmark.circle.fill")
+                                            .foregroundColor(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                }
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 2)
+                                .background(Color.secondary.opacity(0.12))
+                                .cornerRadius(4)
                             }
-                            Config.triggerKeys = triggerKeys
-                            Log.log("[Settings] 触发键已更新: \(triggerKeys.map { $0.displayName })")
+                            Spacer()
                         }
-                    ))
-                    .toggleStyle(.checkbox)
+                    }
                 }
-            }
-            .padding(.leading, 4)
+                .padding(.leading, 4)
 
-            Spacer()
+                // 使用提示
+                (Text("ℹ️ 若常有误触发，切换到\"双击\"。") +
+                 Text("macOS 系统偏好「键盘 → 听写」可能把 fn 双击设为系统听写快捷键 —— 若冲突请在系统偏好关闭听写快捷键。")
+                    .foregroundColor(.secondary))
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 4)
+
+                Divider()
+
+                // 全局快捷键
+                sectionHeader("全局快捷键")
+                HStack(spacing: 10) {
+                    Text("粘贴最后识别结果：").font(.system(size: 12))
+                    HotkeyRecorderView(
+                        binding: $pasteLastBinding,
+                        mode: .combo,
+                        placeholder: "未设置（点击录入）",
+                        onChange: { savePasteLastHotkey() }
+                    )
+                    if pasteLastBinding != nil {
+                        Button("清除") {
+                            pasteLastBinding = nil
+                            savePasteLastHotkey()
+                        }
+                        .controlSize(.small)
+                    }
+                }
+                .padding(.leading, 4)
+
+                Spacer(minLength: 12)
+            }
+            .padding(24)
         }
-        .padding(24)
+    }
+
+    private func commitPendingCustomBinding() {
+        guard let b = pendingNewCustomBinding else { return }
+        let isDuplicate: Bool
+        if b.deviceFlag != 0 {
+            isDuplicate = customBindings.contains { $0.deviceFlag == b.deviceFlag }
+        } else {
+            isDuplicate = customBindings.contains { $0.keyCode == b.keyCode && $0.modifiers == b.modifiers }
+        }
+        if !isDuplicate {
+            customBindings.append(b)
+            Config.customTriggerBindings = customBindings
+            onCustomTriggerBindingsChanged?()
+            Log.log("[Settings] 添加自定义触发键: \(b.displayName)")
+        }
+        pendingNewCustomBinding = nil
+    }
+
+    private func removeCustomBinding(at idx: Int) {
+        guard idx < customBindings.count else { return }
+        let removed = customBindings.remove(at: idx)
+        Config.customTriggerBindings = customBindings
+        onCustomTriggerBindingsChanged?()
+        Log.log("[Settings] 移除自定义触发键: \(removed.displayName)")
+    }
+
+    private func savePasteLastHotkey() {
+        Config.pasteLastHotkey = pasteLastBinding
+        onPasteLastHotkeyChanged?()
+        Log.log("[Settings] 粘贴最后识别结果快捷键已更新: \(pasteLastBinding?.displayName ?? "(清除)")")
     }
 
     // MARK: - Tab 2: 语音识别配置
@@ -104,7 +224,18 @@ struct SettingsView: View {
                 formRow("App ID:", text: $volcAppId)
                 formRow("Access Token:", text: $volcAccessToken)
                 formRow("Resource ID:", text: $volcResourceId)
-                formRow("WebSocket URL:", text: $asrWebSocketURL)
+                HStack(spacing: 8) {
+                    Text("识别模式:")
+                        .frame(width: labelWidth, alignment: .trailing)
+                    Picker("", selection: $asrMode) {
+                        ForEach(ASRMode.allCases, id: \.rawValue) { mode in
+                            Text(mode.displayName).tag(mode)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
                 formRow("热词表 ID:", text: $boostingTableId)
             }
 
@@ -431,11 +562,10 @@ struct SettingsView: View {
         let appId = volcAppId.trimmingCharacters(in: .whitespacesAndNewlines)
         let token = volcAccessToken.trimmingCharacters(in: .whitespacesAndNewlines)
         let resourceId = volcResourceId.trimmingCharacters(in: .whitespacesAndNewlines)
-        let url = asrWebSocketURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let boostingId = boostingTableId.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        if appId.isEmpty || token.isEmpty || resourceId.isEmpty || url.isEmpty {
-            validationError = "App ID、Access Token、Resource ID 和 WebSocket URL 不能为空"
+        if appId.isEmpty || token.isEmpty || resourceId.isEmpty {
+            validationError = "App ID、Access Token、Resource ID 不能为空"
             return
         }
 
@@ -444,10 +574,10 @@ struct SettingsView: View {
         Config.volcAppId = appId
         Config.volcAccessToken = token
         Config.volcResourceId = resourceId
-        Config.asrWebSocketURL = url
+        Config.asrMode = asrMode
         Config.boostingTableId = boostingId
 
-        Log.log("[Settings] 火山引擎配置已保存")
+        Log.log("[Settings] 火山引擎配置已保存 (mode=\(asrMode.rawValue))")
         onClose?()
     }
 }

@@ -12,7 +12,6 @@ class ClickableTextView: NSTextView {
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func mouseDown(with event: NSEvent) {
-        Log.log("[Panel] ClickableTextView mouseDown 被调用, shift=\(event.modifierFlags.contains(.shift))")
         onMouseDown?()
         super.mouseDown(with: event)
     }
@@ -20,25 +19,40 @@ class ClickableTextView: NSTextView {
 
 /// 类似系统输入法 / Rime 的浮动面板，在光标附近实时显示语音识别结果
 final class VoiceInputPanel: NSObject, NSTextViewDelegate {
-    let panel: KeyablePanel  // 使用自定义的 KeyablePanel
+    let panel: KeyablePanel
     private let textView: ClickableTextView
     private let scrollView: NSScrollView
-    private let maxWidth: CGFloat = 480
-    private let initialHeight: CGFloat = 120
-    private let maxHeight: CGFloat = 480
-    private let padding: CGFloat = 10
-    private let cornerRadius: CGFloat = 8
-    private var panelShowsAboveCursor = false  // 记录面板在光标上方还是下方
+    private let maxWidth: CGFloat = 420
+    private let initialHeight: CGFloat = 100
+    private let maxHeight: CGFloat = 400
+    private let padding: CGFloat = 12
+    private let cornerRadius: CGFloat = 10
+    private let hintBarHeight: CGFloat = 24
+    private var panelShowsAboveCursor = false
+
+    private var hintBar: NSView!
+    private var hintLabel: NSTextField!
+    private var separatorLine: NSBox!
+    private var continueButton: NSButton!
+    private var waitingSpinner: NSProgressIndicator!
 
     var onPanelClicked: (() -> Void)?
     var onEditingFinished: ((String) -> Void)?
     var onCancelled: (() -> Void)?
+    var onEditingCancelled: (() -> Void)?
+    var onContinueRecording: (() -> Void)?
     private(set) var isEditing = false
+    /// ASR 文本在 textView 中的插入起点
+    private var asrInsertionPoint: Int = 0
+    /// ASR 当前已插入的文本长度（用于替换更新）
+    private var asrTextLength: Int = 0
     private var savedMainMenu: NSMenu?
 
     override init() {
+        let totalWidth = maxWidth + padding * 2
+        let totalHeight = initialHeight + padding * 2
         panel = KeyablePanel(
-            contentRect: .zero,
+            contentRect: NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight),
             styleMask: [.borderless, .nonactivatingPanel],
             backing: .buffered,
             defer: false
@@ -49,103 +63,166 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         panel.collectionBehavior = [.canJoinAllSpaces]
         panel.hidesOnDeactivate = false
 
-        let contentView = NSView(frame: NSRect(x: 0, y: 0, width: maxWidth + padding * 2, height: initialHeight + padding * 2))
-        contentView.wantsLayer = true
-        contentView.layer?.cornerRadius = cornerRadius
-        contentView.layer?.masksToBounds = true
-
-        let effectView = NSVisualEffectView(frame: contentView.bounds)
-        effectView.autoresizingMask = [.width, .height]
-        effectView.material = .hudWindow
+        // 用 effectView 作为 contentView，自带圆角和毛玻璃
+        let effectView = NSVisualEffectView(frame: NSRect(x: 0, y: 0, width: totalWidth, height: totalHeight))
+        effectView.material = .popover
         effectView.blendingMode = .behindWindow
         effectView.state = .active
         effectView.wantsLayer = true
         effectView.layer?.cornerRadius = cornerRadius
         effectView.layer?.masksToBounds = true
-        contentView.addSubview(effectView)
 
-        scrollView = NSScrollView(frame: NSRect(x: padding, y: padding, width: maxWidth, height: initialHeight))
+        // 底部提示栏
+        hintBar = NSView(frame: NSRect(x: 0, y: 0, width: totalWidth, height: hintBarHeight))
+        hintBar.autoresizingMask = [.width]
+        effectView.addSubview(hintBar)
+
+        separatorLine = NSBox(frame: NSRect(x: padding, y: hintBarHeight - 1, width: totalWidth - padding * 2, height: 1))
+        separatorLine.boxType = .separator
+        separatorLine.autoresizingMask = [.width]
+        effectView.addSubview(separatorLine)
+
+        // "继续识别"按钮（编辑模式显示，录音中隐藏）
+        continueButton = NSButton(title: "继续识别", target: nil, action: nil)
+        continueButton.bezelStyle = .recessed
+        continueButton.controlSize = .small
+        continueButton.font = NSFont.systemFont(ofSize: 11)
+        continueButton.isHidden = true
+        let buttonWidth: CGFloat = 70
+        continueButton.frame = NSRect(x: totalWidth - padding - buttonWidth, y: 2, width: buttonWidth, height: hintBarHeight - 4)
+        continueButton.autoresizingMask = [.minXMargin]
+        hintBar.addSubview(continueButton)
+
+        hintLabel = NSTextField(labelWithString: "")
+        hintLabel.font = NSFont.systemFont(ofSize: 11)
+        hintLabel.textColor = .secondaryLabelColor
+        hintLabel.alignment = .center
+        hintLabel.frame = NSRect(x: padding, y: 2, width: totalWidth - padding * 2, height: hintBarHeight - 4)
+        hintLabel.autoresizingMask = [.width]
+        hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 结束识别    点击文字编辑"
+        hintBar.addSubview(hintLabel)
+
+        // 文本区域：从 hintBar 顶部到面板顶部留 padding
+        let scrollY = hintBarHeight
+        let scrollHeight = totalHeight - scrollY - padding
+        scrollView = NSScrollView(frame: NSRect(x: padding, y: scrollY, width: totalWidth - padding * 2, height: scrollHeight))
         scrollView.autoresizingMask = [.width, .height]
         scrollView.hasVerticalScroller = true
         scrollView.hasHorizontalScroller = false
         scrollView.autohidesScrollers = true
         scrollView.borderType = .noBorder
         scrollView.drawsBackground = false
-        contentView.addSubview(scrollView)
+        effectView.addSubview(scrollView)
 
-        textView = ClickableTextView(frame: scrollView.bounds)
-        textView.isEditable = false
+        let textContentWidth = totalWidth - padding * 2
+        textView = ClickableTextView(frame: NSRect(x: 0, y: 0, width: textContentWidth, height: scrollHeight))
+        textView.isEditable = true
         textView.isSelectable = true
         textView.drawsBackground = false
-        textView.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+        textView.font = NSFont.systemFont(ofSize: 14)
         textView.textColor = .labelColor
-        textView.textContainerInset = NSSize(width: 8, height: 12)
-        textView.textContainer?.containerSize = NSSize(width: maxWidth - 16, height: .greatestFiniteMagnitude)
+        textView.textContainerInset = NSSize(width: 4, height: 8)
+        textView.textContainer?.containerSize = NSSize(width: textContentWidth - 8, height: .greatestFiniteMagnitude)
         textView.textContainer?.widthTracksTextView = true
+        textView.isVerticallyResizable = true
         textView.minSize = NSSize(width: 0, height: 0)
-        textView.maxSize = NSSize(width: maxWidth, height: .greatestFiniteMagnitude)
+        textView.maxSize = NSSize(width: textContentWidth, height: .greatestFiniteMagnitude)
         scrollView.documentView = textView
 
-        panel.contentView = contentView
-        panel.contentView?.wantsLayer = true
-        panel.contentView?.shadow = {
-            let s = NSShadow()
-            s.shadowColor = NSColor.black.withAlphaComponent(0.25)
-            s.shadowOffset = NSSize(width: 0, height: -2)
-            s.shadowBlurRadius = 8
-            return s
-        }()
+        // 等待中旋转图标（跟在 ASR 文字末尾显示；代替以往在文字后追加 ... 的实现）
+        // 作为 textView 子视图，随滚动自动跟随
+        let spinnerSize: CGFloat = 14
+        waitingSpinner = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: spinnerSize, height: spinnerSize))
+        waitingSpinner.style = .spinning
+        waitingSpinner.controlSize = .small
+        waitingSpinner.isDisplayedWhenStopped = false
+        waitingSpinner.isHidden = true
+        textView.addSubview(waitingSpinner)
+
+        panel.contentView = effectView
 
         super.init()
 
         textView.delegate = self
-
-        // 设置 textView 的点击回调
         textView.onMouseDown = { [weak self] in
             self?.handlePanelClick()
+        }
+        continueButton.target = self
+        continueButton.action = #selector(continueButtonClicked)
+    }
+
+    @objc private func continueButtonClicked() {
+        Log.log("[Panel] 点击继续识别按钮")
+        onContinueRecording?()
+    }
+
+    private func updateHintText() {
+        if isEditing {
+            hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 确认插入    tip:可在识别历史中查看"
+            continueButton.isHidden = false
+            // hint label 缩短宽度，给按钮让出空间
+            let buttonSpace: CGFloat = 80
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - buttonSpace
+        } else {
+            hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 结束识别    点击文字进入编辑"
+            continueButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2
         }
     }
 
     private func handlePanelClick() {
-        if isEditing {
-            Log.log("[Panel] 面板被点击，已在编辑模式，跳过 enterEditMode")
-            return
-        }
-        Log.log("[Panel] 面板被点击，进入编辑模式")
-        enterEditMode()
+        if isEditing { return }
+        Log.log("[Panel] 点击面板，停止录音进入编辑模式")
         onPanelClicked?()
     }
 
-    private func enterEditMode() {
-        Log.log("[Panel] enterEditMode: 开始")
-
+    func enterEditMode() {
+        hideWaitingDots()
         isEditing = true
+        updateHintText()
 
-        // 允许面板激活（不添加 .titled，避免出现标题栏条带和 styleMask 切换卡顿）
         panel.styleMask.remove(.nonactivatingPanel)
-
-        // 使文本可编辑（先设置再激活，避免焦点竞争）
-        textView.isEditable = true
-
-        // 激活面板并设置为 key window
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         panel.makeFirstResponder(textView)
-
-        // 将光标放到文本末尾
         textView.setSelectedRange(NSRange(location: textView.string.utf16.count, length: 0))
-
-        // 设置临时 Edit 菜单，使 Cmd+C/V/X/A/Z 等快捷键生效
         setupEditMenu()
-
-        Log.log("[Panel] enterEditMode: 完成，isEditable=\(textView.isEditable), firstResponder=\(panel.firstResponder == textView)")
     }
 
     private func exitEditMode() {
         isEditing = false
-        textView.isEditable = false
+        updateHintText()
         panel.styleMask.insert(.nonactivatingPanel)
         restoreMainMenu()
+    }
+
+    /// 准备从编辑模式恢复录音：记录当前光标位置，退出编辑模式但保留面板
+    func prepareForContinueRecording() {
+        asrInsertionPoint = textView.selectedRange().location
+        asrTextLength = 0
+        exitEditMode()
+    }
+
+    /// ASR 流式结果：在 asrInsertionPoint 处插入/替换文本
+    func insertOrReplaceASRText(_ text: String) {
+        guard panel.isVisible, !isEditing else { return }
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let nsString = textView.string as NSString
+        let safeStart = min(asrInsertionPoint, nsString.length)
+        let safeEnd = min(safeStart + asrTextLength, nsString.length)
+        let replaceRange = NSRange(location: safeStart, length: safeEnd - safeStart)
+
+        // 先去掉可能存在的等待点
+        hideWaitingDots()
+
+        textView.replaceCharacters(in: replaceRange, with: trimmed)
+        asrTextLength = (trimmed as NSString).length
+        let newCursorPos = safeStart + asrTextLength
+        textView.setSelectedRange(NSRange(location: newCursorPos, length: 0))
+        resizePanelToFitText()
+        if !trimmed.isEmpty {
+            textView.scrollRangeToVisible(NSRange(location: newCursorPos, length: 0))
+        }
     }
 
     private func setupEditMenu() {
@@ -174,89 +251,64 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         savedMainMenu = nil
     }
 
-    // NSTextViewDelegate: 监听回车键
+    // NSTextViewDelegate: 监听回车键和 ESC 键
     func textView(_ textView: NSTextView, doCommandBy commandSelector: Selector) -> Bool {
         if commandSelector == #selector(NSResponder.insertNewline(_:)) {
-            Log.log("[Panel] 检测到回车，完成编辑")
             let text = textView.string
             exitEditMode()
             onEditingFinished?(text)
             return true
         }
         if commandSelector == #selector(NSResponder.cancelOperation(_:)) {
-            Log.log("[Panel] 检测到 ESC，取消编辑")
-            exitEditMode()
-            onCancelled?()
+            if isEditing {
+                // 编辑模式 ESC：取消，关闭面板（但记录历史）
+                exitEditMode()
+                onEditingCancelled?()
+            } else {
+                onCancelled?()
+            }
             return true
         }
         return false
     }
-    
-    /// 在指定位置显示面板（通常为光标/鼠标下方，避免遮挡）
-    /// screenPoint 应该是 AppKit 坐标系（原点在左下角，Y 向上）
-    func show(near screenPoint: NSPoint) {
-        Log.log("[Panel.show] 输入点 (AppKit): (\(screenPoint.x), \(screenPoint.y))")
 
+    /// 在指定位置显示面板（录音开始时调用）
+    func show(near screenPoint: NSPoint) {
         let margin: CGFloat = 8
         let size = NSSize(width: maxWidth + padding * 2, height: initialHeight + padding * 2)
 
-        // 获取光标所在屏幕的可见区域
         let screen = NSScreen.screens.first(where: { $0.frame.contains(screenPoint) }) ?? NSScreen.main ?? NSScreen.screens[0]
         let visibleFrame = screen.visibleFrame
-        Log.log("[Panel.show] 屏幕可见区域: (\(visibleFrame.origin.x), \(visibleFrame.origin.y), \(visibleFrame.size.width), \(visibleFrame.size.height))")
 
-        // 默认在光标下方显示，x 从光标位置开始（不居中）
         var originX = screenPoint.x
         var originY = screenPoint.y - size.height - margin
         panelShowsAboveCursor = false
 
-        // 如果面板底部超出屏幕下边界，改为在光标上方显示
         if originY < visibleFrame.minY {
-            originY = screenPoint.y + margin + 34 // 34 是大约一行文字的高度
+            originY = screenPoint.y + margin + 34
             panelShowsAboveCursor = true
-            Log.log("[Panel.show] 光标在底部，面板改为上方显示")
         }
-
-        // 如果面板顶部超出屏幕上边界，限制在屏幕上边界内
         if originY + size.height > visibleFrame.maxY {
             originY = visibleFrame.maxY - size.height
         }
-
-        // 如果面板右侧超出屏幕右边界，左移
         if originX + size.width > visibleFrame.maxX {
             originX = visibleFrame.maxX - size.width
         }
-
-        // 如果面板左侧超出屏幕左边界，右移
         if originX < visibleFrame.minX {
             originX = visibleFrame.minX
         }
 
-        let origin = NSPoint(x: originX, y: originY)
-        Log.log("[Panel.show] 面板位置: origin=(\(origin.x), \(origin.y)), size=(\(size.width), \(size.height))")
-
-        panel.setFrame(NSRect(origin: origin, size: size), display: true)
+        panel.setFrame(NSRect(origin: NSPoint(x: originX, y: originY), size: size), display: true)
         textView.string = ""
+        asrInsertionPoint = 0
+        asrTextLength = 0
+        isEditing = false
+        updateHintText()
         panel.orderFrontRegardless()
-
-        Log.log("[Panel.show] 面板已显示")
-    }
-    
-    func updateText(_ text: String) {
-        guard panel.isVisible else { return }
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        if textView.string != trimmed {
-            textView.string = trimmed
-            resizePanelToFitText()
-            if !trimmed.isEmpty {
-                textView.scrollRangeToVisible(NSRange(location: trimmed.utf16.count, length: 0))
-            }
-        }
     }
 
     /// 根据文字内容动态调整面板高度
     private func resizePanelToFitText() {
-        // 强制排版以获取准确的文字高度
         textView.layoutManager?.ensureLayout(for: textView.textContainer!)
         guard let layoutManager = textView.layoutManager,
               let textContainer = textView.textContainer else { return }
@@ -265,28 +317,19 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         let insetHeight = textView.textContainerInset.height * 2
         let contentHeight = textHeight + insetHeight
 
-        // 限制在 initialHeight ~ maxHeight 范围内
-        let targetHeight = min(max(contentHeight, initialHeight), maxHeight)
+        let targetHeight = min(max(contentHeight + hintBarHeight, initialHeight), maxHeight)
         let panelHeight = targetHeight + padding * 2
 
         let currentFrame = panel.frame
         let currentPanelHeight = currentFrame.height
 
-        // 高度没变就不刷新
         if abs(panelHeight - currentPanelHeight) < 1 { return }
 
         var newOrigin = currentFrame.origin
-        if panelShowsAboveCursor {
-            // 面板在光标上方：底边固定，顶边向上扩展（AppKit 坐标系底边就是 origin.y）
-            // origin.y 不变
-        } else {
-            // 面板在光标下方：顶边固定，底边向下扩展
-            // AppKit 坐标系中 origin 在左下角，顶边 = origin.y + height
-            // 保持顶边不变：newOriginY = oldOriginY + oldHeight - newHeight
+        if !panelShowsAboveCursor {
             newOrigin.y = currentFrame.origin.y + currentPanelHeight - panelHeight
         }
 
-        // 确保不超出屏幕
         if let screen = NSScreen.screens.first(where: { $0.frame.contains(NSPoint(x: currentFrame.midX, y: currentFrame.midY)) }) ?? NSScreen.main {
             let visibleFrame = screen.visibleFrame
             if newOrigin.y < visibleFrame.minY {
@@ -300,31 +343,86 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         let newFrame = NSRect(x: newOrigin.x, y: newOrigin.y, width: currentFrame.width, height: panelHeight)
         panel.setFrame(newFrame, display: true, animate: false)
     }
-    
+
+    /// 在文字末尾显示旋转等待图标
+    func showWaitingDots() {
+        guard !isEditing else { return }
+        positionSpinnerAtTextEnd()
+        waitingSpinner.isHidden = false
+        waitingSpinner.startAnimation(nil)
+    }
+
+    /// 停止等待图标
+    func hideWaitingDots() {
+        waitingSpinner.stopAnimation(nil)
+        waitingSpinner.isHidden = true
+    }
+
+    /// 把 spinner 摆到 textView 中最后一个字形之后（与原"…"动画位置一致）
+    private func positionSpinnerAtTextEnd() {
+        guard let layoutManager = textView.layoutManager,
+              let textContainer = textView.textContainer else { return }
+        layoutManager.ensureLayout(for: textContainer)
+
+        let spinnerSize: CGFloat = 14
+        let inset = textView.textContainerInset
+        let nsString = textView.string as NSString
+        let len = nsString.length
+
+        let x: CGFloat
+        let y: CGFloat
+
+        if len == 0 {
+            // 无文字时显示在左上角（开始录音后等 ASR 首个结果的场景）
+            x = inset.width + 4
+            y = inset.height + 4
+        } else {
+            let lastCharIdx = len - 1
+            let glyphIdx = layoutManager.glyphIndexForCharacter(at: lastCharIdx)
+            let rect = layoutManager.boundingRect(
+                forGlyphRange: NSRange(location: glyphIdx, length: 1),
+                in: textContainer
+            )
+            let rawX = rect.maxX + inset.width + 2
+            // 若摆不下就换到下一行开头
+            let maxX = textView.bounds.width - spinnerSize - 2
+            if rawX > maxX {
+                x = inset.width + 2
+                y = rect.maxY + inset.height + 2
+            } else {
+                x = rawX
+                let lineCenterY = rect.minY + rect.height / 2
+                y = lineCenterY + inset.height - spinnerSize / 2
+            }
+        }
+
+        waitingSpinner.frame = NSRect(x: x, y: y, width: spinnerSize, height: spinnerSize)
+    }
+
     func hide() {
+        hideWaitingDots()
+        if isEditing {
+            exitEditMode()
+        }
         panel.orderOut(nil)
     }
 
     // MARK: - 测试辅助方法
 
-    /// 用于测试：直接设置文本内容
     func setTextForTesting(_ text: String) {
         textView.string = text
     }
 
-    /// 用于测试：模拟按下回车（触发编辑完成）
     func simulateEnterForTesting() {
         let text = textView.string
         exitEditMode()
         onEditingFinished?(text)
     }
 
-    /// 退出编辑模式（供外部调用，比如按右option键时）
     func exitEditModeForTesting() {
         exitEditMode()
     }
 
-    /// 获取当前文本内容
     func getCurrentText() -> String {
         return textView.string
     }
