@@ -37,7 +37,7 @@ extension AppDelegate {
 
         let testPoint = NSPoint(x: 800, y: 400)
         inputPanel?.show(near: testPoint)
-        inputPanel?.updateText(accumulatedText)
+        inputPanel?.insertOrReplaceASRText(accumulatedText)
         Log.log("[TEST] Step 4: 面板已显示在 \(testPoint)")
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
@@ -120,7 +120,7 @@ extension AppDelegate {
             let point = self.cursorOrMouseScreenPoint()
             Log.log("[TEST] Step 5: 光标位置 = \(point)")
             self.inputPanel?.show(near: point)
-            self.inputPanel?.updateText(testText)
+            self.inputPanel?.insertOrReplaceASRText(testText)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 Log.log("[TEST] Step 6: 开始插入文字")
@@ -224,7 +224,7 @@ extension AppDelegate {
 
         let testPoint = NSPoint(x: 800, y: 400)
         inputPanel?.show(near: testPoint)
-        inputPanel?.updateText(accumulatedText)
+        inputPanel?.insertOrReplaceASRText(accumulatedText)
         Log.log("[TEST] Step 3: 面板已显示在 (\(testPoint.x), \(testPoint.y))")
         Log.log("[TEST] TEST_PANEL_SHOWN")
 
@@ -469,7 +469,7 @@ extension AppDelegate {
             }
 
             self.inputPanel?.show(near: cursorPoint)
-            self.inputPanel?.updateText(self.accumulatedText)
+            self.inputPanel?.insertOrReplaceASRText(self.accumulatedText)
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
                 if let panel = self.inputPanel?.panel {

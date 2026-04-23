@@ -44,6 +44,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     // 以下属性为 internal 以供 AppDelegate+Tests.swift extension 访问
     var isRecording = false
     var accumulatedText: String = ""
+    /// 最后一次成功写出的识别结果（ASR 原文或编辑后文本）。
+    /// 供"粘贴最后识别结果"全局快捷键使用。Personal / Distribution 两版独立存储，互不共享。
+    var lastRecognitionResult: String = ""
     /// 本 app 在后台时记录的前台应用，粘贴时先激活它再注入，否则注入会发到本 app 无效
     var lastFrontmostApp: NSRunningApplication?
     var frontmostCaptureTimer: DispatchSourceTimer?
@@ -60,7 +63,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// 当修饰键按下后如果有其他普通键按下，则标记为组合操作，释放时不触发
     private var otherKeyPressed = false
     /// 记录按下修饰键时的设备级 flags，用于释放时匹配
-    private var pendingTriggerKey: TriggerKey?
+    private var pendingTrigger: ActiveTrigger?
     /// 记录在触发键按下期间是否曾经有过其他修饰键同时存在（用于过滤 Karabiner 等工具的合成事件）
     private var hadOtherModsDuringPending = false
 
@@ -69,23 +72,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pendingTriggerTime: CFAbsoluteTime = 0
     /// 上次 toggleRecording 的时间戳，用于防抖（防止 Karabiner 等工具产生的快速连续触发）
     private var lastToggleTime: CFAbsoluteTime = 0
+    /// 激活态的触发键：内置的 TriggerKey 或用户自定义的单修饰键 binding（两者等价参与检测循环）
+    enum ActiveTrigger: Equatable {
+        case builtin(TriggerKey)
+        case custom(deviceFlag: UInt64, displayName: String)
+
+        var deviceFlag: UInt64 {
+            switch self {
+            case .builtin(let k): return k.deviceFlag
+            case .custom(let f, _): return f
+            }
+        }
+        var displayName: String {
+            switch self {
+            case .builtin(let k): return k.displayName
+            case .custom(_, let n): return n
+            }
+        }
+    }
+
     /// NSEvent 全局监听器（Cocoa 层级），用于捕获 BTT 等工具消费后仍可见的键盘事件
     private var globalKeyMonitor: Any?
     /// NSEvent 全局鼠标监听器，防止 Option+鼠标点击（如终端移动光标）误触发语音识别
     private var globalMouseMonitor: Any?
+    /// NSEvent 全局 systemDefined 监听器：捕获 F1/F2/F10 等系统键（亮度/音量/媒体）
+    /// 这些键按下时 OS 发送 NSSystemDefined（subtype 8 = Aux Keys），
+    /// 不走 CGEvent 的 keyDown 流，所以必须单独监听，否则 fn+F1 等组合会被当成"单独按 fn"误触发
+    private var globalSystemDefinedMonitor: Any?
     /// 触发键上次释放的时间戳，用于检测 BTT 导致的快速释放-重按序列
     private var lastTriggerReleaseTime: CFAbsoluteTime = 0
     /// 上次释放的触发键，用于匹配释放-重按序列
-    private var lastReleasedTriggerKey: TriggerKey?
+    private var lastReleasedTrigger: ActiveTrigger?
+    /// 双击匹配：上次"单击释放但未触发"的键 + 时间，用于在 doubleTap 模式下识别双击
+    private var lastSingleTapTrigger: ActiveTrigger?
+    private var lastSingleTapReleaseTime: CFAbsoluteTime = 0
+    /// 当前 pending 是否因"识别到双击第二次按下"而被标记，释放时照常触发
+    private var isDoubleTapPending: Bool = false
+    /// 双击匹配的最大间隔（秒）
+    private let doubleTapWindow: CFTimeInterval = 0.4
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         Log.log("applicationDidFinishLaunching 开始")
-        Config.migrateToKeychainIfNeeded()
+        Config.migrateOnLaunchIfNeeded()
         setupMainMenu()
         setupMenuBar()
         Log.log("菜单栏已设置")
         setupGlobalHotkey()
         Log.log("全局快捷键已设置，触发键: \(Config.triggerKeys.map { $0.displayName })")
+        registerPasteLastHotkey()
+        registerCustomTriggerHotkeys()
         checkAccessibilityPermission()
         // 麦克风权限不在启动时预请求：LSUIElement（菜单栏常驻）应用从后台调用
         // AVCaptureDevice.requestAccess，TCC 守护进程会静默吞掉对话框，
@@ -130,6 +165,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if isRecording {
             stopRecording()
         }
+        if let m = globalSystemDefinedMonitor {
+            NSEvent.removeMonitor(m)
+            globalSystemDefinedMonitor = nil
+        }
+        GlobalHotkeyManager.shared.unregisterAll()
     }
 
     /// 后台时持续记录当前前台应用（非本 app），供停止时激活并注入文字
@@ -169,7 +209,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
 
             if type == .keyDown || type == .keyUp {
-                if delegate.pendingTriggerKey != nil {
+                if delegate.pendingTrigger != nil {
                     delegate.otherKeyPressed = true
                 }
                 // 回车键（keyCode 36）在录音中且面板可见时，停止录音并插入文本
@@ -248,15 +288,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // listenOnly CGEvent tap 看不到这些事件，但 NSEvent 全局监听器可能仍能收到。
         // 这是第二道防线。
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
-            guard let self = self, self.pendingTriggerKey != nil else { return }
+            guard let self = self, self.pendingTrigger != nil else { return }
             self.otherKeyPressed = true
         }
 
         // NSEvent 鼠标监听器：防止 Option+鼠标点击（如终端中移动光标）误触发
         // 使用 NSEvent 全局监听器而非 CGEvent tap，不会干扰鼠标事件的正常传递
         globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
-            guard let self = self, self.pendingTriggerKey != nil else { return }
+            guard let self = self, self.pendingTrigger != nil else { return }
             self.otherKeyPressed = true
+        }
+
+        // NSEvent systemDefined 监听器：F1/F2/F10 等系统键（亮度/音量/媒体/键盘背光）
+        // 按下时 OS 发 NSSystemDefined 事件，CGEvent tap 的 keyDown/keyUp 看不到。
+        // pending 期间检测到这类按键 → 标记 otherKeyPressed，阻止误触发（如 fn+F1）。
+        globalSystemDefinedMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.systemDefined]) { [weak self] event in
+            guard let self = self, self.pendingTrigger != nil else { return }
+            // subtype 8 = Aux Keys（亮度、音量、媒体、键盘背光等），其他 subtype 忽略
+            if event.subtype.rawValue == 8 {
+                self.otherKeyPressed = true
+            }
         }
     }
 
@@ -264,8 +315,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func handleFlagsChanged(_ event: CGEvent) {
         let rawFlags = event.flags.rawValue
         let triggerKeys = Config.triggerKeys
+        let customBindings = Config.customTriggerBindings
 
-        if triggerKeys.isEmpty { return }
+        if triggerKeys.isEmpty && customBindings.isEmpty { return }
 
         // 注意：Karabiner 合成事件的 keycode 不保留原始物理键值（如 Caps Lock→rightOption
         // 时 keycode=61 而非 57），因此不能用 keycode 区分合成 vs 真实。
@@ -289,16 +341,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         // Karabiner 将 Caps Lock 映射为 left_control + right_option 时，
         // 会产生 rightOption↓ → leftControl↓(~3ms后) → leftControl↑(~135ms后) → rightOption↑
         // 只要 pending 期间出现过任何其他修饰键，就标记为组合键，阻止触发。
-        if let pending = pendingTriggerKey, !hadOtherModsDuringPending {
+        if let pending = pendingTrigger, !hadOtherModsDuringPending {
             let otherMods = currentDeviceFlags & ~pending.deviceFlag
             if otherMods != 0 {
                 hadOtherModsDuringPending = true
             }
         }
 
+        // 合并：内置触发键 + 用户自定义的单修饰键 binding（deviceFlag != 0 的视为有效）
+        let allTriggers: [ActiveTrigger] =
+            triggerKeys.map { ActiveTrigger.builtin($0) } +
+            customBindings
+                .filter { $0.deviceFlag != 0 }
+                .map { ActiveTrigger.custom(deviceFlag: $0.deviceFlag, displayName: $0.displayName) }
+
         // 检测哪个触发键刚被按下（之前没有，现在有了）
-        for key in triggerKeys {
-            let keyFlag = key.deviceFlag
+        for trigger in allTriggers {
+            let keyFlag = trigger.deviceFlag
             let wasDown = (activeModifiers & keyFlag) != 0
             let isDown = (currentDeviceFlags & keyFlag) != 0
 
@@ -306,27 +365,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 // 修饰键刚按下：检查是否只有这一个修饰键被按下
                 let otherModFlags = currentDeviceFlags & ~keyFlag
                 if otherModFlags == 0 {
-                    // 检测 BTT 导致的快速释放-重按序列：
-                    // BTT 处理 Option+O 时会先释放 Option，再重新按下 Option，间隔极短（<100ms）
-                    // 如果同一个触发键在刚释放后很快又被按下，说明是 BTT 的合成序列，跳过
+                    let isDoubleTapMode = (Config.triggerActivation == .doubleTap)
+                    // BTT 快速释放-重按序列检测（单击模式适用；双击模式下此窗口会误伤用户真双击，跳过）
                     let timeSinceLastRelease = now - lastTriggerReleaseTime
-                    if lastReleasedTriggerKey == key && timeSinceLastRelease < 0.5 {
-                        pendingTriggerKey = nil
+                    if !isDoubleTapMode && lastReleasedTrigger == trigger && timeSinceLastRelease < 0.5 {
+                        pendingTrigger = nil
                         hadOtherModsDuringPending = false
                     } else {
-                        pendingTriggerKey = key
+                        pendingTrigger = trigger
                         pendingTriggerTime = now
                         otherKeyPressed = false
                         hadOtherModsDuringPending = false
+                        // 双击匹配：若本次按下的键恰好是上次"第 1 次释放"记录的键且在窗口内，标记 pending
+                        if isDoubleTapMode,
+                           lastSingleTapTrigger == trigger,
+                           now - lastSingleTapReleaseTime < doubleTapWindow {
+                            isDoubleTapPending = true
+                        } else {
+                            isDoubleTapPending = false
+                        }
                     }
                 } else {
                     // 有其他修饰键同时按下，不触发
-                    pendingTriggerKey = nil
+                    pendingTrigger = nil
                     hadOtherModsDuringPending = false
                 }
             } else if !isDown && wasDown {
                 // 修饰键刚释放：检查是否满足"单独按下并释放"条件
-                if let pending = pendingTriggerKey, pending == key, !hadOtherModsDuringPending {
+                if let pending = pendingTrigger, pending == trigger, !hadOtherModsDuringPending {
                     // 确认释放时没有其他修饰键仍被按下
                     let remainingMods = currentDeviceFlags & ~keyFlag
                     if remainingMods == 0 {
@@ -341,24 +407,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
                             let hadKeyEventDuringHold = hidKeyDown < holdDuration || hidKeyUp < holdDuration || csKeyDown < holdDuration || csKeyUp < holdDuration
                             if !hadKeyEventDuringHold {
-                                let triggerKeyName = key.displayName
-                                let isRec = isRecording
-                                let pendingStart = pendingTriggerTime
-                                DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
-                                    guard let self = self else { return }
-                                    if self.otherKeyPressed || self.isAnyNonModifierKeyPressed() {
-                                        return
+                                let isDoubleTapMode = (Config.triggerActivation == .doubleTap)
+                                // 双击模式下：第一次释放只记录时间，不触发；等第二次按下+释放
+                                if isDoubleTapMode && !isDoubleTapPending {
+                                    lastSingleTapTrigger = trigger
+                                    lastSingleTapReleaseTime = now
+                                } else {
+                                    let triggerKeyName = trigger.displayName
+                                    let isRec = isRecording
+                                    let pendingStart = pendingTriggerTime
+                                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
+                                        guard let self = self else { return }
+                                        if self.otherKeyPressed || self.isAnyNonModifierKeyPressed() {
+                                            return
+                                        }
+                                        let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
+                                        let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+                                        let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
+                                        let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
+                                        let dCsKU = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
+                                        let hadKeyEventDelayed = dHidKD < totalElapsed || dHidKU < totalElapsed || dCsKD < totalElapsed || dCsKU < totalElapsed
+                                        if !hadKeyEventDelayed {
+                                            Log.log("[Hotkey] 触发键 \(triggerKeyName) 确认触发, isRecording=\(isRec), mode=\(isDoubleTapMode ? "double" : "single")")
+                                            self.toggleRecording()
+                                        }
                                     }
-                                    let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
-                                    let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
-                                    let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
-                                    let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
-                                    let dCsKU = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyUp)
-                                    let hadKeyEventDelayed = dHidKD < totalElapsed || dHidKU < totalElapsed || dCsKD < totalElapsed || dCsKU < totalElapsed
-                                    if !hadKeyEventDelayed {
-                                        Log.log("[Hotkey] 触发键 \(triggerKeyName) 确认触发, isRecording=\(isRec)")
-                                        self.toggleRecording()
-                                    }
+                                    // 触发后清双击状态
+                                    lastSingleTapTrigger = nil
+                                    isDoubleTapPending = false
                                 }
                             }
                         }
@@ -367,8 +443,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
                 // 记录释放时间和释放的键，用于检测 BTT 快速释放-重按序列
                 lastTriggerReleaseTime = now
-                lastReleasedTriggerKey = key
-                pendingTriggerKey = nil
+                lastReleasedTrigger = trigger
+                pendingTrigger = nil
                 hadOtherModsDuringPending = false
             }
         }
@@ -858,7 +934,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         closePanelAndInsertText()
     }
 
-    /// 用户再次按 F5 或通过其他方式关闭面板时，自动插入文本
+    /// 根据 Config.pasteLastHotkey 注册（或取消注册）全局快捷键
+    func registerPasteLastHotkey() {
+        if let binding = Config.pasteLastHotkey, binding.keyCode != 0 {
+            GlobalHotkeyManager.shared.register(id: "pasteLast", binding: binding) { [weak self] in
+                self?.pasteLastResult()
+            }
+        } else {
+            GlobalHotkeyManager.shared.unregister(id: "pasteLast")
+        }
+    }
+
+    /// 根据 Config.customTriggerBindings 里"组合键"类（keyCode != 0）的绑定注册全局快捷键。
+    /// 单修饰键类（keyCode == 0 && deviceFlag != 0）由 handleFlagsChanged 的 press/release 路径处理，
+    /// 不走 Carbon RegisterEventHotKey。
+    func registerCustomTriggerHotkeys() {
+        GlobalHotkeyManager.shared.unregisterAll(withPrefix: "customTrigger_")
+        for (idx, binding) in Config.customTriggerBindings.enumerated() where binding.keyCode != 0 {
+            GlobalHotkeyManager.shared.register(id: "customTrigger_\(idx)", binding: binding) { [weak self] in
+                self?.toggleRecording()
+            }
+        }
+    }
+
+    /// 把最后一条识别结果粘贴到当前输入框。无记录时哔一声。
+    /// 注意：Personal / Distribution 两版各自独立，本方法只读本进程的 lastRecognitionResult。
+    private func pasteLastResult() {
+        guard !lastRecognitionResult.isEmpty else {
+            Log.log("[Hotkey] pasteLastResult: 本版无历史记录（Personal/Distribution 互不共享）")
+            NSSound.beep()
+            return
+        }
+        Log.log("[Hotkey] pasteLastResult: 粘贴 \(lastRecognitionResult.count) 字")
+        PasteboardPaste.paste(text: lastRecognitionResult, activateTarget: nil)
+    }
+
     func closePanelAndInsertText() {
         let text = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
 
@@ -880,6 +990,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 NSPasteboard.general.setString(text, forType: .string)
             }
             RecognitionHistory.append(text: text, app: appName)
+            lastRecognitionResult = text
         } else {
             Log.log("无识别文字，不插入")
         }
@@ -1089,6 +1200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             let originalText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             RecognitionHistory.append(text: trimmed, app: appName, originalText: originalText)
+            lastRecognitionResult = trimmed
 
             // 清理编辑模式保存的目标应用
             editModeTargetApp = nil

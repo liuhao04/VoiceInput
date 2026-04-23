@@ -24,6 +24,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         settingsView.onClose = { [weak self] in
             self?.window?.close()
         }
+        settingsView.onPasteLastHotkeyChanged = {
+            (NSApp.delegate as? AppDelegate)?.registerPasteLastHotkey()
+        }
+        settingsView.onCustomTriggerBindingsChanged = {
+            (NSApp.delegate as? AppDelegate)?.registerCustomTriggerHotkeys()
+        }
         settingsView.initialTab = tab
 
         let hostingView = NSHostingView(rootView: settingsView)
