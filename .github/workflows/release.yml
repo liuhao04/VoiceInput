@@ -12,10 +12,8 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
-    - name: Setup Swift
-      uses: swift-actions/setup-swift@v1
-      with:
-        swift-version: '5.9'
+    - name: Print toolchain
+      run: swift --version && xcodebuild -version
 
     - name: Import Code Signing Certificate
       env:
