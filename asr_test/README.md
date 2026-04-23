@@ -18,7 +18,8 @@
 - `VOLC_APP_ID`
 - `VOLC_ACCESS_TOKEN`
 - `VOLC_RESOURCE_ID`
-- `ASR_WS_URL`（默认 `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`）
+- `ASR_WS_URL`（默认 `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`，
+  测试流式输入模式可改为 `.../api/v3/sauc/bigmodel_nostream`）
 
 ## 使用方式
 
