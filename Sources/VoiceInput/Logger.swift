@@ -1,13 +1,17 @@
 import Foundation
 import os
 
-/// 同时输出到控制台、os.Logger (Console.app) 和 ~/Library/Logs/VoiceInput.log
+/// 同时输出到控制台、os.Logger (Console.app) 和 ~/Library/Logs/<BundleName>.log
+/// 个人版与分发版使用各自的 Bundle ID/Name，从而独立写入不同的 log 文件和 Console subsystem。
 enum Log {
+    private static let bundleID = Bundle.main.bundleIdentifier ?? "com.voiceinput.mac"
+    private static let bundleName = (Bundle.main.infoDictionary?["CFBundleName"] as? String) ?? "VoiceInput"
+
     /// 系统日志：自动集成到 Console.app，支持日志级别和搜索
-    private static let osLogger = os.Logger(subsystem: "com.voiceinput.mac", category: "general")
+    private static let osLogger = os.Logger(subsystem: bundleID, category: "general")
     static var logFileURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Library/Logs/VoiceInput.log")
+            .appendingPathComponent("Library/Logs/\(bundleName).log")
     }
     private static let logPath = logFileURL
     private static let queue = DispatchQueue(label: "com.voiceinput.log")

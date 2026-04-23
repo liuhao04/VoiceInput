@@ -17,31 +17,31 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 
 项目维护两个完全隔离的版本，从同一份代码构建：
 
-| | Personal 版（个人开发） | Distribution 版（分发） |
+| | Personal 版（个人开发） | Distribution 版（分发 / 本地对照） |
 |---|---|---|
 | Bundle ID | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
-| 安装路径 | `~/Applications/VoiceInput Personal.app` | `/Applications/VoiceInput.app`（用户拖拽） |
-| 构建脚本 | `./scripts/build-and-install.sh` | `./scripts/build-dmg.sh` |
+| 安装路径 | `~/Applications/VoiceInput Personal.app` | `/Applications/VoiceInput.app`（用户拖拽或本机原地更新） |
+| 构建脚本 | `./scripts/build-and-install.sh`（默认同时装 Distribution） | `./scripts/build-dmg.sh`（产公证 DMG） |
 | 菜单栏图标 | mic.fill + 紫色角标 | mic.fill（template，自适配明暗模式） |
 | Keychain service | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
 | UserDefaults domain | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
 | Log file | `~/Library/Logs/VoiceInput Personal.log` | `~/Library/Logs/VoiceInput.log` |
 | TCC 权限 | 独立授权 | 独立授权 |
-| 用途 | 日常自用，每次代码改动后构建 | 发给朋友/公测，公证后分发 |
+| 用途 | 日常自用 | 发给朋友/公测 + 本机并排对照 |
 
 两个版本可以同时安装、同时运行，互不干扰。
 
-**Personal 版（每次代码改动 MUST 跑这个）：**
+**每次代码改动 MUST 跑这个（默认装 Personal + Distribution 两个）：**
 ```bash
 ./scripts/build-and-install.sh
 ```
 1. 自动递增 `CFBundleVersion`
-2. 构建 release，复制到 `~/Applications/VoiceInput Personal.app`
-3. 用 PlistBuddy 把 Bundle ID 改为 `.personal`、显示名改为 `VoiceInput Personal`（不污染源 plist）
-4. 自动用本机 Developer ID Application 证书签名
-5. 如已运行则按路径精确 kill 重启（不影响 distribution 版进程）
+2. 构建一次 release
+3. **Personal 版**：复制到 `~/Applications/VoiceInput Personal.app`、PlistBuddy 改 Bundle ID/显示名、Developer ID 签名、按路径 kill+open
+4. **Distribution 版**：若 `/Applications/VoiceInput.app` 已存在，原地替换 `Contents/MacOS/VoiceInput` 和 `Contents/Info.plist`（保留 bundle 路径以保留 TCC 权限）、PlistBuddy 写回 `com.voiceinput.mac` + `VoiceInput`、同一证书签名、按路径 kill+open；若不存在则跳过并提示先用 `build-dmg.sh`
+5. 两个版本可选 flag：`--personal-only` / `--distribution-only` 只装其中一个
 
-**Distribution 版（要分发时跑）：**
+**Distribution 版正式分发（要公证时跑）：**
 ```bash
 ./scripts/build-dmg.sh                 # 签名 + 公证（需要 NOTARIZE_API_KEY_* 环境变量）
 ./scripts/build-dmg.sh --skip-notarize # 仅签名
@@ -98,10 +98,10 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 - This prevents missing the first few words after pressing F5
 
 **Config:**
-- Sensitive credentials (App ID, Access Token, Boosting Table ID) stored in macOS Keychain via `KeychainHelper.swift`
-- Non-sensitive config (Resource ID, WebSocket URL) stored in UserDefaults
-- Environment variables (`VOLC_APP_ID`, `VOLC_ACCESS_TOKEN`, `VOLC_BOOSTING_TABLE_ID`) can override Keychain values
-- API endpoint: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`
+- Sensitive credentials (App ID, Access Token, Boosting Table ID) stored as plain JSON at `~/Library/Application Support/<CFBundleName>/credentials.json` (chmod 0600) via `CredentialsStore.swift` —— 不用 Keychain，原因见下方 "Keychain: Don't Use It"
+- Non-sensitive config (Resource ID, ASR mode) stored in UserDefaults
+- Environment variables (`VOLC_APP_ID`, `VOLC_ACCESS_TOKEN`, `VOLC_BOOSTING_TABLE_ID`) can override stored values
+- API endpoint: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`（由 `asrMode` 派生）
 
 ## Development Workflow Guidelines
 
@@ -179,36 +179,29 @@ macOS permissions (Microphone, Accessibility, etc.) are tied to the app's **code
 - Keep the `VoiceInput.entitlements` file empty (just `<dict/>`)
 - Only replace files inside the app bundle, never recreate the bundle from scratch
 
-## Keychain Best Practices (Lessons Learned)
+## Keychain: Don't Use It (Lessons Learned)
 
-**Problem**: Legacy Keychain ACL binds to creator's `cdhash`. Every rebuild changes cdhash → macOS prompts "想要使用钥匙串中的机密信息" even after clicking "始终允许".
+**结论**：在 Developer ID 签名 + 非沙盒 + 无 provisioning profile 条件下，macOS Keychain **没有**"不弹窗"的干净方案。本项目应避开 Keychain，凭证改存 `~/Library/Application Support/`。
 
-**Solution**: Use `SecAccessCreate` with empty trusted app list:
-```swift
-var access: SecAccess?
-SecAccessCreate("VoiceInput" as CFString, [] as CFArray, &access)
-// [] = any app can access without prompt (NOT nil, which means "creator only")
-addQuery[kSecAttrAccess as String] = access
-```
+**2026-04-23 实测验证了三条都走不通（曾错误地认为 Legacy ACL 有解）**：
+
+1. **Legacy ACL `SecAccessCreate(name, [] as CFArray, &access)`** —— 曾误以为 `[]` = "any app can access without prompt"。**错了**。实际语义：
+   - `nil` → "creator only"（绑 cdhash，rebuild 弹）
+   - `[]` → "no trusted apps"，**任何 app 访问都弹 + 点"始终允许"后下次还弹**（partition list 机制）
+   - 命令行 `security` 工具也会被弹（不同 partition）
+   - 用户确认过：点"始终允许"下一次仍弹；同一次 run 里读多条会每条都弹
+
+2. **`kSecUseDataProtectionKeychain: true`** —— Probe 返回 **-34018 `errSecMissingEntitlement`**，不管有没有 `kSecAttrAccessGroup` 都报错。Developer ID 签名不会自动授予任何 access group。
+
+3. **加 `keychain-access-groups` entitlement** —— codesign 成功但启动 **Error 163 `Launchd job spawn failed`**。`keychain-access-groups` 需要 provisioning profile 声明该 access group，Developer ID 签名本身不带 profile。
+
+**迁移 legacy 条目时的必要弹窗**：迁出 legacy Keychain 条目的唯一办法是 `SecItemCopyMatching`，它受 ACL 保护会弹窗。**不能 lazy 迁移**（会把弹窗分散到用户好几次启动里），必须在首次启动时一次性把所有 4 个 key 读完、写入新存储、`SecItemDelete`。用户最多要点 ~4 次"始终允许"，然后永不再弹。
 
 **NEVER do:**
-1. **NEVER use `kSecUseDataProtectionKeychain: true`** — without provisioning profile it returns -34018 (`errSecMissingEntitlement`). Verified: even without explicit `kSecAttrAccessGroup`, Data Protection Keychain requires `keychain-access-groups` entitlement → provisioning profile → Error 163 without one.
-2. **NEVER delete old Keychain entries before verifying new write succeeded** — migration code that deletes first then writes can lose user credentials if the write fails (e.g., -34018 errSecMissingEntitlement)
-3. **NEVER use `SecItemUpdate` to fix ACL** — `SecItemUpdate` on an entry with old ACL also triggers the Keychain popup. Instead use read → delete → re-add (only read triggers popup, and only once).
-4. **NEVER use build number in ACL migration key** — Using `keychainACLRefreshed_build_\(build)` causes migration to run on every build. Use a fixed key like `keychainACLFixed_v1` so migration runs only once.
-
-**Current ACL fix pattern** (in `Config.migrateToKeychainIfNeeded`):
-```swift
-// Fixed key — runs once ever, not per build
-if !UserDefaults.standard.bool(forKey: "keychainACLFixed_v1") {
-    for key in keys {
-        guard let value = get(forKey: key) else { continue }  // may popup once
-        delete(forKey: key)                                     // no popup
-        set(value, forKey: key)                                 // creates with open ACL
-    }
-    UserDefaults.standard.set(true, forKey: "keychainACLFixed_v1")
-}
-```
+1. ~~"加 `keychain-access-groups` entitlement 或用 DPK"~~ —— 见上面 2/3 条，都坏掉。
+2. **NEVER use partition list hack** (`security set-generic-password-partition-list`) —— 需要用户 login 密码交互、仍绑 cdhash、OS 升级后脆弱。
+3. **NEVER delete old Keychain entries before verifying new write succeeded** — migration code that deletes first then writes can lose user credentials if the write fails.
+4. **NEVER use `SecItemUpdate` to fix ACL** — `SecItemUpdate` on an entry with old ACL also triggers the Keychain popup. Instead use read → delete → re-add.
 
 ## Karabiner Hotkey Interaction (Lessons Learned)
 
