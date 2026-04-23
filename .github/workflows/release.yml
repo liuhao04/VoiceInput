@@ -117,7 +117,7 @@ jobs:
       if: env.SKIP_SIGNING != 'true' && env.SKIP_NOTARIZE != 'true'
       env:
         API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
-        API_KEY_ISSUER_ID: ${{ secrets.NOTARIZE_API_KEY_ISSUER_ID }}
+        API_KEY_ISSUER_ID: ${{ secrets.NOTARIZE_API_ISSUER_ID }}
       run: |
         echo "Submitting for notarization..."
         xcrun notarytool submit VoiceInput.dmg \

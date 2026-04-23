@@ -239,7 +239,7 @@ When users remap keys with Karabiner Elements:
 | `DEVELOPER_ID_CERTIFICATE_P12` | Base64-encoded .p12 certificate |
 | `DEVELOPER_ID_CERTIFICATE_PASSWORD` | .p12 export password |
 | `NOTARIZE_API_KEY_ID` | App Store Connect API Key ID |
-| `NOTARIZE_API_KEY_ISSUER_ID` | App Store Connect Issuer ID |
+| `NOTARIZE_API_ISSUER_ID` | App Store Connect Issuer ID |
 | `NOTARIZE_API_KEY_CONTENT` | Base64-encoded .p8 API key file |
 
 **Entitlements**: `VoiceInput.entitlements` must contain `com.apple.security.device.audio-input = true`. Hardened runtime gates microphone access BEFORE TCC: without this entitlement, `AVCaptureDevice.requestAccess(for: .audio)` returns false in ~20ms silently (no TCC prompt, no DB write). Accessibility (TCC), Keychain (no ACL group), and networking still don't need entitlements. Do NOT add `keychain-access-groups` or App Sandbox entitlements — those require a provisioning profile, which breaks ad-hoc local signing.
