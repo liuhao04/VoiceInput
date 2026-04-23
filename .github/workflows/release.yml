@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  build:
+  build-sign-notarize:
     runs-on: macos-13
 
     steps:
@@ -17,27 +17,146 @@ jobs:
       with:
         swift-version: '5.9'
 
-    - name: Build Release
+    - name: Import Code Signing Certificate
+      env:
+        P12_BASE64: ${{ secrets.DEVELOPER_ID_CERTIFICATE_P12 }}
+        P12_PASSWORD: ${{ secrets.DEVELOPER_ID_CERTIFICATE_PASSWORD }}
       run: |
-        swift build -c release
+        # 如果没有配置证书 secret，跳过签名（用于测试）
+        if [ -z "$P12_BASE64" ]; then
+          echo "::warning::No signing certificate configured. Building unsigned."
+          echo "SKIP_SIGNING=true" >> $GITHUB_ENV
+          exit 0
+        fi
 
-        # Create app bundle
+        # 创建临时 keychain
+        KEYCHAIN_PATH=$RUNNER_TEMP/signing.keychain-db
+        KEYCHAIN_PASSWORD=$(uuidgen)
+
+        security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+        security set-keychain-settings -lut 21600 "$KEYCHAIN_PATH"
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        # 导入证书
+        echo "$P12_BASE64" | base64 --decode > $RUNNER_TEMP/certificate.p12
+        security import $RUNNER_TEMP/certificate.p12 \
+          -P "$P12_PASSWORD" \
+          -A \
+          -t cert \
+          -f pkcs12 \
+          -k "$KEYCHAIN_PATH"
+
+        # 添加到 keychain 搜索列表
+        security list-keychains -d user -s "$KEYCHAIN_PATH" $(security list-keychains -d user | tr -d '"')
+
+        # 允许 codesign 访问私钥（无交互提示）
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+
+        # 保存 keychain 路径和密码供后续步骤使用
+        echo "KEYCHAIN_PATH=$KEYCHAIN_PATH" >> $GITHUB_ENV
+        echo "KEYCHAIN_PASSWORD=$KEYCHAIN_PASSWORD" >> $GITHUB_ENV
+
+        # 验证证书
+        security find-identity -v -p codesigning "$KEYCHAIN_PATH"
+
+    - name: Setup Notarization API Key
+      if: env.SKIP_SIGNING != 'true'
+      env:
+        API_KEY_CONTENT: ${{ secrets.NOTARIZE_API_KEY_CONTENT }}
+        API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+      run: |
+        if [ -z "$API_KEY_CONTENT" ]; then
+          echo "::warning::No notarization API key configured. Skipping notarization."
+          echo "SKIP_NOTARIZE=true" >> $GITHUB_ENV
+          exit 0
+        fi
+
+        mkdir -p $RUNNER_TEMP/notarize_key
+        echo "$API_KEY_CONTENT" | base64 --decode > $RUNNER_TEMP/notarize_key/AuthKey_${API_KEY_ID}.p8
+
+    - name: Build Release
+      run: swift build -c release
+
+    - name: Create App Bundle
+      run: |
         mkdir -p VoiceInput.app/Contents/MacOS
         mkdir -p VoiceInput.app/Contents/Resources
 
-        # Copy binary
         cp .build/release/VoiceInput VoiceInput.app/Contents/MacOS/
-
-        # Copy Info.plist
         cp Info.plist VoiceInput.app/Contents/
 
-        # Copy icon if exists
-        if [ -f Resources/AppIcon.icns ]; then
-          cp Resources/AppIcon.icns VoiceInput.app/Contents/Resources/
+        if [ -f Assets/AppIcon.icns ]; then
+          cp Assets/AppIcon.icns VoiceInput.app/Contents/Resources/
         fi
 
-        # Create DMG
-        hdiutil create -volname "VoiceInput" -srcfolder VoiceInput.app -ov -format UDZO VoiceInput.dmg
+    - name: Sign App Bundle
+      if: env.SKIP_SIGNING != 'true'
+      run: |
+        codesign --deep --force --options runtime \
+          --sign "Developer ID Application" \
+          --entitlements VoiceInput.entitlements \
+          VoiceInput.app
+
+        # 验证签名
+        codesign --verify --deep --strict VoiceInput.app
+        echo "Code signature verified."
+
+    - name: Create DMG
+      run: |
+        hdiutil create -volname "VoiceInput" \
+          -srcfolder VoiceInput.app \
+          -ov -format UDZO \
+          VoiceInput.dmg
+
+    - name: Sign DMG
+      if: env.SKIP_SIGNING != 'true'
+      run: |
+        codesign --force --sign "Developer ID Application" VoiceInput.dmg
+
+    - name: Notarize DMG
+      if: env.SKIP_SIGNING != 'true' && env.SKIP_NOTARIZE != 'true'
+      env:
+        API_KEY_ID: ${{ secrets.NOTARIZE_API_KEY_ID }}
+        API_KEY_ISSUER_ID: ${{ secrets.NOTARIZE_API_KEY_ISSUER_ID }}
+      run: |
+        echo "Submitting for notarization..."
+        xcrun notarytool submit VoiceInput.dmg \
+          --key $RUNNER_TEMP/notarize_key/AuthKey_${API_KEY_ID}.p8 \
+          --key-id "$API_KEY_ID" \
+          --issuer "$API_KEY_ISSUER_ID" \
+          --wait \
+          --timeout 30m \
+          2>&1 | tee notarize_output.txt
+
+        if grep -q "status: Accepted" notarize_output.txt; then
+          echo "Notarization accepted."
+        else
+          echo "Notarization failed. Fetching log..."
+          SUBMISSION_ID=$(grep "id:" notarize_output.txt | head -1 | awk '{print $2}')
+          if [ -n "$SUBMISSION_ID" ]; then
+            xcrun notarytool log "$SUBMISSION_ID" \
+              --key $RUNNER_TEMP/notarize_key/AuthKey_${API_KEY_ID}.p8 \
+              --key-id "$API_KEY_ID" \
+              --issuer "$API_KEY_ISSUER_ID" 2>&1 || true
+          fi
+          exit 1
+        fi
+
+    - name: Staple Notarization Ticket
+      if: env.SKIP_SIGNING != 'true' && env.SKIP_NOTARIZE != 'true'
+      run: |
+        xcrun stapler staple VoiceInput.dmg
+        xcrun stapler validate VoiceInput.dmg
+        echo "Stapled and validated."
+
+    - name: Cleanup Signing Materials
+      if: always()
+      run: |
+        if [ -n "$KEYCHAIN_PATH" ] && [ -f "$KEYCHAIN_PATH" ]; then
+          security delete-keychain "$KEYCHAIN_PATH" || true
+        fi
+        rm -rf $RUNNER_TEMP/notarize_key || true
+        rm -f $RUNNER_TEMP/certificate.p12 || true
 
     - name: Create Release
       uses: softprops/action-gh-release@v1
@@ -45,6 +164,8 @@ jobs:
         files: VoiceInput.dmg
         body: |
           ## VoiceInput ${{ github.ref_name }}
+
+          ✅ Signed with Apple Developer ID and notarized by Apple.
 
           ### Installation
           1. Download `VoiceInput.dmg`
@@ -58,6 +179,6 @@ jobs:
           - Accessibility permission
 
           ### What's Changed
-          See [CHANGELOG.md](https://github.com/liuhao04/VoiceInput/blob/main/CHANGELOG.md) for details.
+          See [CHANGELOG.md](https://github.com/${{ github.repository }}/blob/main/CHANGELOG.md) for details.
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
