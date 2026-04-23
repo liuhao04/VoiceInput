@@ -105,3 +105,7 @@ code-review.md
 
 # 用户替换规则文件
 replace-rules.json
+dist/
+
+# 第三方参考资料 PDF（有版权，不入库）
+docs/*.pdf
