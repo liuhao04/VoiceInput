@@ -51,6 +51,9 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         onError = nil  // 防止关闭时的 socket 错误触发 UI 报错
         webSocketTask?.cancel(with: .goingAway, reason: nil)
         webSocketTask = nil
+        // URLSession 强引用 delegate（即 self），不 invalidate 则每次录音泄漏一个 VolcanoASR + 连接
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
     }
 
     /// 便捷方法：发送负包后 0.3s 自动关闭连接（用于测试等快速关闭场景）。
@@ -90,34 +93,41 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         let session = URLSession(configuration: .default, delegate: self, delegateQueue: nil)
         urlSession = session
         webSocketTask = session.webSocketTask(with: req)
-        _asrLog("WebSocket 连接中: \(Config.asrWebSocketURL)")
         webSocketTask?.resume()
     }
     
     private func sendFullClientRequest() {
-        _asrLog("发送 full client request (gzip)")
         guard let task = webSocketTask else { return }
+        let mode = Config.asrMode
+        var audio: [String: Any] = [
+            "format": "pcm",
+            "rate": 16000,
+            "bits": 16,
+            "channel": 1
+        ]
+        var request: [String: Any] = [
+            "model_name": "bigmodel",
+            "enable_itn": true,
+            "enable_punc": true,
+            "enable_ddc": true        // 语义顺滑
+        ]
+        switch mode {
+        case .async:
+            // 双向流式（优化版）：二遍识别提高尾字准确率；端点不支持 audio.language
+            request["enable_nonstream"] = true
+            request["end_window_size"] = 2500  // VAD 判停 ms，调大以减少思考停顿被过早 finalize
+        case .nostream:
+            // 流式输入：不支持 enable_nonstream；language 仅此端点生效
+            audio["language"] = "zh-CN"
+        }
         var params: [String: Any] = [
             "user": [
                 "uid": "voice_input_mac",
                 "did": "mac",
                 "platform": "macOS"
             ],
-            "audio": [
-                "format": "pcm",
-                "rate": 16000,
-                "bits": 16,
-                "channel": 1,
-                "language": "zh-CN"
-            ],
-            "request": [
-                "model_name": "bigmodel",
-                "enable_itn": true,
-                "enable_punc": true,
-                "enable_ddc": true,       // 语义顺滑
-                "enable_nonstream": true,  // 二遍识别，提高准确率
-                "end_window_size": 3000   // VAD 判停时间(ms)，默认800，增大以容忍思考停顿
-            ]
+            "audio": audio,
+            "request": request
         ]
         // corpus 参数：热词表和替换词表（仅在有值时添加）
         var corpus: [String: Any] = [:]
@@ -136,11 +146,6 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
             return
         }
 
-        // 调试：打印发送的 JSON
-        if let jsonString = String(data: jsonData, encoding: .utf8) {
-            _asrLog("发送的 request JSON: \(jsonString)")
-        }
-
         guard let payload = Gzip.compress(jsonData) else {
             _asrLog("full client request gzip 压缩失败")
             onError?(NSError(domain: "VolcanoASR", code: -1, userInfo: [NSLocalizedDescriptionKey: "首包 gzip 压缩失败"]))
@@ -157,19 +162,13 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
                 self.onError?(e)
                 return
             }
-            _asrLog("full client request 已发送，等待服务端首包响应后再开麦")
-            // 不在此处 onReady：与测试脚本一致，等收到首包成功响应后再开麦
         }
     }
     
     private func _sendAudio(_ data: Data, isLast: Bool) {
-        guard let task = webSocketTask else {
-            _asrLog("_sendAudio 跳过: webSocketTask 为空")
-            return
-        }
+        guard let task = webSocketTask else { return }
         if !isConnectionReady {
             pcmQueue.append((data: data, isLast: isLast))
-            _asrLog("连接未就绪，PCM 入队，当前队列长度=\(pcmQueue.count)")
             return
         }
         _doSendAudio(task: task, data: data, isLast: isLast)
@@ -194,7 +193,6 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         for item in pcmQueue {
             _doSendAudio(task: task, data: item.data, isLast: item.isLast)
         }
-        _asrLog("已刷新 PCM 队列，共 \(pcmQueue.count) 包")
         pcmQueue.removeAll()
     }
     
@@ -247,7 +245,6 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         if messageType != 0x09 { return }
         if !hasReceivedFirstResponse {
             hasReceivedFirstResponse = true
-            _asrLog("收到首包成功响应，连接就绪，开始发送音频")
             queue.async { [weak self] in
                 guard let self = self else { return }
                 self.isConnectionReady = true
@@ -275,20 +272,26 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         }
 
         // flags 含义：0x00=无序列号, 0x01=正序列号(一遍), 0x02=最后一包(负包), 0x03=负序列号(二遍)
-        let isNonStreamResult = (flags == 0x03)
+        // 不同模式下"最终结果"的信号不同：
+        //   async   端点走二遍识别（flags=0x03）
+        //   nostream 端点没有二遍；最后一包（0x02）或负序列号（0x03）都视为最终
+        let isFinal: Bool
+        switch Config.asrMode {
+        case .async:    isFinal = (flags == 0x03)
+        case .nostream: isFinal = (flags == 0x02 || flags == 0x03)
+        }
 
         if let json = try? JSONSerialization.jsonObject(with: payload) as? [String: Any],
            let result = json["result"] as? [String: Any],
            let text = result["text"] as? String, !text.isEmpty {
-            _asrLog("识别结果 (flags=0x\(String(flags, radix: 16)), 二遍=\(isNonStreamResult)): \(text)")
-            DispatchQueue.main.async { self.onText?(text, isNonStreamResult) }
+            _asrLog("识别结果 (flags=0x\(String(flags, radix: 16)), final=\(isFinal)): \(text)")
+            DispatchQueue.main.async { self.onText?(text, isFinal) }
         }
     }
 }
 
 extension VolcanoASR: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
-        _asrLog("WebSocket 已连接，稍后发送首包")
         // 延迟一帧再发首包，确保 socket 已可写（避免 "Socket is not connected"）
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
             self?.sendFullClientRequest()
@@ -297,7 +300,6 @@ extension VolcanoASR: URLSessionWebSocketDelegate {
     }
     
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
-        _asrLog("WebSocket 已关闭 code=\(closeCode.rawValue)")
     }
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let e = error {

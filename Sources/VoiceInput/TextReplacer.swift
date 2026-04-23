@@ -51,14 +51,31 @@ final class TextReplacer {
         }
     }
 
-    /// 对文本逐条应用替换规则
+    /// 对文本逐条应用替换规则，清理中文字符间的多余空格，去掉句尾标点
     func apply(_ text: String) -> String {
-        guard !rules.isEmpty else { return text }
         var result = text
         for rule in rules {
             result = result.replacingOccurrences(of: rule.from, with: rule.to)
         }
+        result = Self.cleanChineseSpaces(result)
+        result = Self.removeTrailingPunctuation(result)
         return result
+    }
+
+    /// 去掉句尾标点（中英文句号、问号、感叹号、逗号、分号、冒号、省略号等）
+    static func removeTrailingPunctuation(_ text: String) -> String {
+        // 匹配末尾的中英文标点（可能多个，如 "。。。" 或 "..."）
+        let pattern = "[。，！？；：、…\\.\\,\\!\\?;:]+$"
+        return text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+    }
+
+    /// 去除中文字符/标点之间的多余空格，保留中英/中数之间的空格
+    /// 例如："因为 你" → "因为你"，但 "什么 VAD" 保持不变
+    static func cleanChineseSpaces(_ text: String) -> String {
+        // CJK统一汉字 + CJK标点 + 全角符号
+        let cjk = "[\\u4e00-\\u9fff\\u3000-\\u303f\\uff00-\\uffef]"
+        let pattern = "(\(cjk))\\s+(\(cjk))"
+        return text.replacingOccurrences(of: pattern, with: "$1$2", options: .regularExpression)
     }
 
     /// 添加一条规则并保存
