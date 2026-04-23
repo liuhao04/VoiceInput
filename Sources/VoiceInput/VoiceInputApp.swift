@@ -599,6 +599,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let monitorItem = NSMenuItem(title: "用量监控", action: #selector(openVolcMonitor), keyEquivalent: "")
         monitorItem.target = self
         menu.addItem(monitorItem)
+        let credentialItem = NSMenuItem(title: "申请火山引擎凭证…", action: #selector(openVolcCredentialGuide), keyEquivalent: "")
+        credentialItem.target = self
+        menu.addItem(credentialItem)
+        let privacyItem = NSMenuItem(title: "隐私政策", action: #selector(openPrivacyPolicy), keyEquivalent: "")
+        privacyItem.target = self
+        menu.addItem(privacyItem)
         let logItem = NSMenuItem(title: "打开日志文件", action: #selector(openLogFile), keyEquivalent: "")
         logItem.target = self
         menu.addItem(logItem)
@@ -635,6 +641,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.open(url)
         } else {
             Log.log("无法打开监控 URL: AppID 或 ResourceID 未配置")
+        }
+    }
+
+    @objc private func openVolcCredentialGuide() {
+        if let url = URL(string: "https://console.volcengine.com/speech/app") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    @objc private func openPrivacyPolicy() {
+        if let url = URL(string: "https://github.com/liuhao04/VoiceInput/blob/main/docs/PRIVACY.md") {
+            NSWorkspace.shared.open(url)
         }
     }
 
