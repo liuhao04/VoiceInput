@@ -239,6 +239,19 @@ struct SettingsView: View {
                 formRow("热词表 ID:", text: $boostingTableId)
             }
 
+            // 凭证来源与热词说明
+            VStack(alignment: .leading, spacing: 6) {
+                HStack(spacing: 4) {
+                    Text("凭证从")
+                    Link("火山引擎语音控制台",
+                         destination: URL(string: "https://console.volcengine.com/speech/app")!)
+                    Text("获取。")
+                }
+                Text("热词表需在火山引擎控制台的「热词管理」中创建，本应用目前仅接收 ID，暂不提供 App 内创建/编辑。")
+                    .foregroundColor(.secondary)
+            }
+            .font(.caption)
+
             Spacer()
 
             // 保存按钮

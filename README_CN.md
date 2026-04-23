@@ -43,7 +43,7 @@ INSTALL_DIR="/Applications" ./scripts/build-and-install.sh
 
 - **App ID** — 从火山引擎控制台获取
 - **Access Token** — 从火山引擎控制台获取
-- **Boosting Table ID**（可选）— 用于自定义热词识别（暂不支持，开发中）
+- **Boosting Table ID**（可选）— 应用会把该 ID 透传给火山 ASR 用于热词加权。热词表本身需要在火山引擎控制台「热词管理」中创建/编辑，本应用暂不支持在 App 内管理热词
 
 也可以在启动前设置环境变量：
 
@@ -55,9 +55,11 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # 可选
 
 ### 获取火山引擎凭证
 
-1. 访问[火山引擎语音控制台](https://console.volcengine.com/speech)
-2. 创建或选择一个应用以获取 App ID 和 Access Token
-3. （可选）创建热词表以获取 Boosting Table ID（热词功能暂不支持）
+1. 在[火山引擎](https://www.volcengine.com/)注册/登录后，进入[语音服务控制台](https://console.volcengine.com/speech/)，找到「流式语音识别（大模型）」并按提示开通。
+2. 进入[应用列表](https://console.volcengine.com/speech/app)创建一个应用，拿到 **App ID** 和 **Access Token**。
+3. （可选）在控制台「热词管理」中创建热词表后，把 **Boosting Table ID** 填入设置。应用仅将该 ID 透传给火山 ASR，热词的增删改仍在控制台完成。
+
+关于麦克风音频与凭证的处理方式，请见 [docs/PRIVACY.md](docs/PRIVACY.md)。
 
 ## 权限
 
@@ -105,6 +107,10 @@ Sources/VoiceInput/
 # 使用真实麦克风的端到端测试（5 秒）
 ./scripts/e2e-test-mic.sh
 ```
+
+## 隐私
+
+见 [docs/PRIVACY.md](docs/PRIVACY.md)：音频仅流式发送到火山引擎识别、不落盘；凭证与历史记录仅存储在本机；应用不内置任何分析、遥测或崩溃上报。
 
 ## 许可证
 

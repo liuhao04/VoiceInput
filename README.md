@@ -53,7 +53,7 @@ On first launch, click the menu bar icon > **Settings** and enter:
 
 - **App ID** — from Volcano Engine console
 - **Access Token** — from Volcano Engine console
-- **Boosting Table ID** (optional) — for custom hotword recognition (not yet supported, under development)
+- **Boosting Table ID** (optional) — the app sends this ID to the ASR API for hotword boosting. You must create/edit the hotword table in the Volcano Engine console yourself; managing hotwords inside the app is not yet supported.
 
 Alternatively, set environment variables before launching:
 
@@ -65,9 +65,11 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # optional
 
 ### Getting Volcano Engine Credentials
 
-1. Visit [Volcano Engine Speech Console](https://console.volcengine.com/speech)
-2. Create or select an application to get the App ID and Access Token
-3. (Optional) Create a hotword table to get a Boosting Table ID (hotword boosting is not yet supported)
+1. Register/log in to [Volcano Engine](https://www.volcengine.com/), then activate the **Streaming Speech Recognition (流式语音识别)** service on the [Speech Console](https://console.volcengine.com/speech/).
+2. Open [the app list](https://console.volcengine.com/speech/app) and create an application to obtain the **App ID** and **Access Token**.
+3. (Optional) Create a hotword table in the console to obtain a **Boosting Table ID**. The app sends this ID through on every request; the table itself must be maintained in the Volcano Engine console.
+
+See [docs/PRIVACY.md](docs/PRIVACY.md) for how your audio and credentials are handled.
 
 ## Permissions
 
@@ -123,6 +125,10 @@ Contributions are welcome! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for gui
 ## Changelog
 
 See [CHANGELOG.md](CHANGELOG.md) for release history.
+
+## Privacy
+
+See [docs/PRIVACY.md](docs/PRIVACY.md). Audio is streamed to Volcano Engine for recognition and is not stored by the app; credentials and transcripts live only on your machine. No analytics or telemetry.
 
 ## License
 
