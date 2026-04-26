@@ -162,8 +162,8 @@ if wait_for_condition "pgrep -x VoiceInput > /dev/null" 10; then
 
     # 检查菜单栏图标
     if pgrep -x VoiceInput > /dev/null; then
-        VERSION_FROM_PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$HOME/Applications/VoiceInput.app/Contents/Info.plist").$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$HOME/Applications/VoiceInput.app/Contents/Info.plist")
-        log_test_result "安装与启动测试" "pass" "App 已成功安装并启动\n安装路径: ~/Applications/VoiceInput.app\n版本号: $VERSION_FROM_PLIST" "$screenshot"
+        VERSION_FROM_PLIST=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "/Applications/VoiceInput.app/Contents/Info.plist").$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "/Applications/VoiceInput.app/Contents/Info.plist")
+        log_test_result "安装与启动测试" "pass" "App 已成功安装并启动\n安装路径: /Applications/VoiceInput.app\n版本号: $VERSION_FROM_PLIST" "$screenshot"
     else
         log_test_result "安装与启动测试" "fail" "App 未能启动" "$screenshot"
     fi
@@ -209,7 +209,7 @@ echo -e "\n${YELLOW}[测试 5/7]${NC} 菜单栏交互测试..."
 
 # 确保 app 在运行
 if ! pgrep -x VoiceInput > /dev/null; then
-    open "$HOME/Applications/VoiceInput.app"
+    open "/Applications/VoiceInput.app"
     sleep 2
 fi
 
@@ -256,7 +256,7 @@ echo -e "\n${YELLOW}[测试 7/7]${NC} 权限检查..."
 MIC_PERMISSION=$(osascript -e '
 tell application "System Events"
     try
-        set micStatus to do shell script "sqlite3 ~/Library/Application\\ Support/com.apple.TCC/TCC.db \"SELECT service, allowed FROM access WHERE service = '\''kTCCServiceMicrophone'\'' AND client = '\'''"$HOME"'/Applications/VoiceInput.app'\''\" 2>/dev/null || echo \"未知\""
+        set micStatus to do shell script "sqlite3 ~/Library/Application\\ Support/com.apple.TCC/TCC.db \"SELECT service, allowed FROM access WHERE service = '\''kTCCServiceMicrophone'\'' AND client = '\''com.voiceinput.mac'\''\" 2>/dev/null || echo \"未知\""
         return micStatus
     on error
         return "权限查询失败"

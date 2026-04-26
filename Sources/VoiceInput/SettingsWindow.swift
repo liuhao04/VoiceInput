@@ -51,6 +51,12 @@ final class SettingsWindow: NSObject, NSWindowDelegate {
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    /// 临时隐藏窗口（不销毁），防止在应用切换时闪现
+    func orderOutIfVisible() {
+        guard let w = window, w.isVisible else { return }
+        w.orderOut(nil)
+    }
+
     // MARK: - NSWindowDelegate
 
     func windowWillClose(_ notification: Notification) {

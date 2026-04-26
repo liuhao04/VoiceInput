@@ -1,12 +1,26 @@
 #!/usr/bin/env bash
 # 交互式录音测试：提示用户说"测试一下"，然后验证是否正确识别并插入到 TextEdit
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-APP_PATH="$HOME/Applications/VoiceInput.app"
-APP_EXE="$APP_PATH/Contents/MacOS/VoiceInput"
-LOG_FILE="$HOME/Library/Logs/VoiceInput.log"
+source "$SCRIPT_DIR/app-target.sh"
+
+TARGET="distribution"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --distribution) TARGET="distribution"; shift ;;
+        --personal) TARGET="personal"; shift ;;
+        -h|--help)
+            echo "Usage: ./scripts/test-recording-interactive.sh [--distribution|--personal]"
+            voiceinput_target_usage
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+voiceinput_configure_target "$TARGET"
+LOG_FILE="$VOICEINPUT_LOG_FILE"
 
 # ANSI 颜色
 RED='\033[0;31m'
@@ -22,7 +36,7 @@ echo -e "${BLUE}========================================${NC}"
 # 1. 构建并安装
 echo -e "\n${YELLOW}[1/7] 构建并安装应用...${NC}"
 cd "$PROJECT_DIR"
-"$SCRIPT_DIR/build-and-install.sh"
+"$SCRIPT_DIR/build-and-install.sh" "$VOICEINPUT_BUILD_FLAG"
 
 # 2. 清空日志
 echo -e "\n${YELLOW}[2/7] 清空日志文件...${NC}"
@@ -31,13 +45,13 @@ echo "日志已清空"
 
 # 3. 启动应用
 echo -e "\n${YELLOW}[3/7] 启动 VoiceInput...${NC}"
-pkill -x VoiceInput 2>/dev/null || true
+voiceinput_kill_target
 sleep 1
-open "$APP_PATH"
+open "$VOICEINPUT_APP_PATH"
 sleep 3
 
 # 验证进程是否运行
-if ! pgrep -x VoiceInput > /dev/null; then
+if ! pgrep -f "$VOICEINPUT_EXE" > /dev/null; then
     echo -e "${RED}✗ 应用启动失败${NC}"
     exit 1
 fi

@@ -43,23 +43,15 @@ DIST_APP_PATH="/Applications/VoiceInput.app"
 
 cd "$PROJECT_DIR"
 
-# 每次 build 自动递增 CFBundleVersion（构建号），便于区分版本
-PLIST="$PROJECT_DIR/Info.plist"
-CURRENT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || echo "0")
-NEXT=$((CURRENT + 1))
-/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" "$PLIST"
-echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST").$NEXT (build $NEXT)"
-
-echo "Building release..."
-swift build -c release
-
 # 决定签名身份（两个版本共用）
 # 自动检测本机开发者证书进行签名，保持代码身份一致，避免每次构建后重新授权权限。
 # 可通过 SIGNING_IDENTITY 环境变量覆盖，设为 "none" 可跳过签名。
 ENTITLEMENTS="$PROJECT_DIR/VoiceInput.entitlements"
 SIGN_IDENTITY_EFFECTIVE=""
+SIGNING_DISABLED=false
 if [ "$SIGNING_IDENTITY" = "none" ]; then
     echo "Skipping code signing (SIGNING_IDENTITY=none)"
+    SIGNING_DISABLED=true
 elif [ -n "$SIGNING_IDENTITY" ]; then
     SIGN_IDENTITY_EFFECTIVE="$SIGNING_IDENTITY"
 else
@@ -70,10 +62,27 @@ else
     SIGN_IDENTITY_EFFECTIVE="$AUTO_IDENTITY"
 fi
 
+if [ "$SIGNING_DISABLED" != true ] && [ -z "$SIGN_IDENTITY_EFFECTIVE" ]; then
+    echo "ERROR: No code signing identity found."
+    echo "Install would not have a stable signed code identity or embedded microphone entitlement."
+    echo "Install a Developer ID Application / Apple Development certificate, set SIGNING_IDENTITY, or explicitly set SIGNING_IDENTITY=none."
+    exit 1
+fi
+
+# 每次 build 自动递增 CFBundleVersion（构建号），便于区分版本
+PLIST="$PROJECT_DIR/Info.plist"
+CURRENT=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" "$PLIST" 2>/dev/null || echo "0")
+NEXT=$((CURRENT + 1))
+/usr/libexec/PlistBuddy -c "Set :CFBundleVersion $NEXT" "$PLIST"
+echo "Version: $(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$PLIST").$NEXT (build $NEXT)"
+
+echo "Building release..."
+swift build -c release
+
 sign_bundle() {
     local bundle="$1"
-    if [ -z "$SIGN_IDENTITY_EFFECTIVE" ]; then
-        echo "  No signing identity found, using linker ad-hoc signature for $bundle"
+    if [ "$SIGNING_DISABLED" = true ]; then
+        echo "  Code signing explicitly skipped for $bundle"
         return 0
     fi
     echo "  Signing $bundle with: $SIGN_IDENTITY_EFFECTIVE"
@@ -85,6 +94,16 @@ if [ "$INSTALL_PERSONAL" = true ]; then
     echo ""
     echo "=== Personal 版 ==="
     echo "Creating app bundle at $APP_PATH"
+
+    # 若正在运行则先退出再替换文件。覆盖正在运行的已签名 Mach-O 会触发
+    # macOS Code Signature Invalid / Invalid Page，表现为进程被系统杀掉。
+    RUNNING_PID=$(pgrep -f "$APP_PATH/Contents/MacOS/VoiceInput" || true)
+    if [ -n "$RUNNING_PID" ]; then
+      echo "Stopping running Personal version (pid $RUNNING_PID)..."
+      kill "$RUNNING_PID" || true
+      sleep 1
+    fi
+
     # 不要删除整个 app bundle，以保持权限
     mkdir -p "$APP_PATH/Contents/MacOS"
     mkdir -p "$APP_PATH/Contents/Resources"
@@ -112,14 +131,6 @@ if [ "$INSTALL_PERSONAL" = true ]; then
         echo "⚠️  发现旧的 ~/Applications/VoiceInput.app (bundle ID: $OLD_BID)"
         echo "    它和当前 Personal 版是不同 bundle ID，权限/凭证已迁移到 Personal 版。"
         echo "    可以安全删除：rm -rf \"$OLD_APP_PATH\""
-    fi
-
-    # 若正在运行则先退出再启动（用路径精确匹配，避免误杀分发版）
-    RUNNING_PID=$(pgrep -f "$APP_PATH/Contents/MacOS/VoiceInput" || true)
-    if [ -n "$RUNNING_PID" ]; then
-      echo "Stopping running Personal version (pid $RUNNING_PID)..."
-      kill "$RUNNING_PID" || true
-      sleep 1
     fi
 
     echo "Launching $BUNDLE_NAME..."

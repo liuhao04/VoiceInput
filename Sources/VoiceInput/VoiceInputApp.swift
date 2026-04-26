@@ -37,7 +37,7 @@ struct VoiceInputApp {
     }
 }
 
-final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unchecked Sendable {
     private var statusItem: NSStatusItem?
     private var audioCapture: AudioCapture?
     private var asr: VolcanoASR?
@@ -157,6 +157,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.log("[TEST] 检测到 iTerm2 多显示器测试模式，1秒后启动测试")
             DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
                 self.runITerm2MonitorTest()
+            }
+        } else if CommandLine.arguments.contains("--test-paste-smoke") {
+            Log.log("[TEST] 检测到粘贴冒烟测试模式，1秒后启动测试")
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+                self.runPasteSmokeTest()
             }
         }
     }
@@ -866,6 +871,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    /// panel.hide() 之前调用：编辑模式或"继续识别"路径下 VoiceInput 会残留前台状态，
+    /// 隐藏面板时 macOS 会把 key 转给同 app 下一个可见窗口（历史 / 设置），产生闪现。
+    /// 先 orderOut 这些辅助窗口避免闪现。非前台时是 no-op，不会影响常规录音场景下
+    /// 用户后台挂着设置/历史的体验。
+    private func orderOutAuxWindowsIfFrontmost() {
+        guard NSApp.isActive else { return }
+        HistoryWindow.shared.orderOutIfVisible()
+        SettingsWindow.shared.orderOutIfVisible()
+    }
+
     /// ESC 取消：关闭面板，不插入文字
     func cancelRecording() {
         Log.log("cancelRecording: 取消录音，不插入文字")
@@ -880,6 +895,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         asr = nil
         accumulatedText = ""
 
+        orderOutAuxWindowsIfFrontmost()
         inputPanel?.hide()
         inputPanel = nil
     }
@@ -913,6 +929,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             Log.log("stopRecording: 无识别文字，直接关闭")
             asr?.close()
             asr = nil
+            orderOutAuxWindowsIfFrontmost()
             inputPanel?.hide()
             inputPanel = nil
             return
@@ -991,6 +1008,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let text = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 隐藏面板
+        orderOutAuxWindowsIfFrontmost()
         inputPanel?.hide()
         inputPanel = nil
 
@@ -1193,8 +1211,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Log.log("handleEditingFinished: testTargetApp = \(testTargetApp?.localizedName ?? "nil") (\(testTargetApp?.bundleIdentifier ?? "nil"))")
 
         // 编辑模式下 VoiceInput 是前台应用，隐藏面板后 macOS 会激活下一个可见的 VoiceInput 窗口
-        // 如果历史记录窗口处于打开状态，就会闪现。所以先将其隐藏。
-        HistoryWindow.shared.orderOutIfVisible()
+        // 如果历史记录窗口 / 设置窗口处于打开状态，就会闪现。
+        orderOutAuxWindowsIfFrontmost()
 
         // 隐藏面板
         inputPanel?.hide()
@@ -1231,7 +1249,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func handleEditingCancelled() {
         Log.log("handleEditingCancelled: 取消插入，记录历史")
 
-        HistoryWindow.shared.orderOutIfVisible()
+        orderOutAuxWindowsIfFrontmost()
 
         let panelText = inputPanel?.getCurrentText() ?? ""
         inputPanel?.hide()

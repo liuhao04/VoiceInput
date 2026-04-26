@@ -55,6 +55,8 @@ struct HistoryEntry: Codable {
 }
 
 enum RecognitionHistory {
+    private static let queue = DispatchQueue(label: "com.voiceinput.history")
+
     private static let historyDir: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history")
@@ -78,14 +80,22 @@ enum RecognitionHistory {
         historyDir.appendingPathComponent(filename(year: year, month: month))
     }
 
-    /// 追加一条记录。originalText 为 ASR 原始结果，text 为实际插入的文本（可能经用户编辑）
+    /// 追加一条记录。originalText 为 ASR 原始结果，text 为实际插入的文本（可能经用户编辑）。
+    /// 历史目录位于 iCloud Drive，文件系统偶尔会同步阻塞；写入放到后台队列避免卡住菜单栏 UI。
     static func append(text: String, app: String, originalText: String? = nil) {
+        let entryTime = Date()
+        queue.async {
+            appendSync(text: text, app: app, originalText: originalText, time: entryTime)
+        }
+    }
+
+    private static func appendSync(text: String, app: String, originalText: String?, time: Date) {
         ensureDirectory()
 
         // 如果 originalText 与 text 不同，记录编辑后的文本
         let edited: String? = if let orig = originalText, orig != text { text } else { nil }
         let recorded = originalText ?? text
-        let entry = HistoryEntry(text: recorded, app: app, edited: edited)
+        let entry = HistoryEntry(time: time, text: recorded, app: app, edited: edited)
 
         // 手动拼 JSON 以保证字段顺序：time, app, text, edited
         func esc(_ s: String) -> String {

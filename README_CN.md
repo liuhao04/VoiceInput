@@ -29,12 +29,12 @@ cd VoiceInput
 ./scripts/build-and-install.sh
 ```
 
-脚本会构建 release 版本并安装到 `~/Applications/VoiceInput.app`。如需自定义安装位置：
+脚本会构建 release 版本，并维护两个相互隔离的本地版本：
 
-```bash
-INSTALL_DIR="/Applications" ./scripts/build-and-install.sh
-```
+- **Personal 版**：`com.voiceinput.mac.personal`，安装到 `~/Applications/VoiceInput Personal.app`
+- **Distribution 版**：`com.voiceinput.mac`，当 `/Applications/VoiceInput.app` 已存在时原地更新
 
+只更新其中一个版本可使用 `./scripts/build-and-install.sh --personal-only` 或 `./scripts/build-and-install.sh --distribution-only`。Distribution 首次安装应通过 `./scripts/build-dmg.sh` 生成 DMG 后拖入 Applications。
 ## 配置
 
 ### API 凭证
@@ -60,6 +60,8 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # 可选
 3. （可选）在控制台「热词管理」中创建热词表后，把 **Boosting Table ID** 填入设置。应用仅将该 ID 透传给火山 ASR，热词的增删改仍在控制台完成。
 
 关于麦克风音频与凭证的处理方式，请见 [docs/PRIVACY.md](docs/PRIVACY.md)。
+
+凭证本地保存在 `~/Library/Application Support/<App Name>/credentials.json`，文件权限为 `0600`；本项目不使用 Keychain 存储这些凭证。
 
 ## 权限
 
@@ -89,7 +91,7 @@ Sources/VoiceInput/
   PasteboardPaste.swift     # 剪贴板粘贴 + 恢复
   CursorLocator.swift       # 通过辅助功能 API 定位光标
   Config.swift              # 配置管理
-  KeychainHelper.swift      # 安全凭证存储
+  CredentialsStore.swift    # 本地 credentials.json 凭证存储
   SettingsWindow.swift      # 设置窗口 UI
   HistoryWindow.swift       # 识别历史 UI
   Logger.swift              # 文件日志

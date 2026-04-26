@@ -168,7 +168,7 @@ class VisualTest:
 
     def verify_app_installed(self):
         """验证 app 是否正确安装"""
-        app_path = Path.home() / "Applications/VoiceInput.app"
+        app_path = Path("/Applications/VoiceInput.app")
         info_plist = app_path / "Contents/Info.plist"
         exe_path = app_path / "Contents/MacOS/VoiceInput"
 
@@ -247,7 +247,7 @@ class VisualTest:
     def test_process_running(self):
         """测试 2: 进程运行状态"""
         # 先启动 app
-        subprocess.run(["open", str(Path.home() / "Applications/VoiceInput.app")],
+        subprocess.run(["open", "/Applications/VoiceInput.app"],
                       check=False)
         time.sleep(2)
 
@@ -301,7 +301,7 @@ class VisualTest:
         version_from_menu = self.get_app_version_from_menu()
 
         # 从 Info.plist 读取版本
-        info_plist = Path.home() / "Applications/VoiceInput.app/Contents/Info.plist"
+        info_plist = Path("/Applications/VoiceInput.app/Contents/Info.plist")
         result = subprocess.run(
             ["/usr/libexec/PlistBuddy", "-c",
              "Print :CFBundleShortVersionString", str(info_plist)],

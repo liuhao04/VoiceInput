@@ -26,10 +26,34 @@
 ### 运行 E2E 测试
 ```bash
 # 模拟音频测试
-./scripts/e2e-test-app.sh
+./scripts/e2e-test-app.sh --distribution --skip-build
 
 # 真实麦克风测试（5秒录音）
-./scripts/e2e-test-mic.sh
+./scripts/e2e-test-mic.sh 5 --distribution --skip-build
+```
+
+### 推荐测试顺序
+日常验证 Distribution 版时，按这个顺序跑：
+
+```bash
+# 1. 快速编译和协议检查
+./scripts/ci-test.sh
+
+# 2. 真实 app 粘贴路径，验证 TextEdit 注入和剪贴板恢复
+./scripts/paste-smoke-test.sh --distribution --no-relaunch
+
+# 3. mock 音频 E2E，验证 ASR 协议到 TextEdit 注入
+./scripts/e2e-test-app.sh --distribution --skip-build
+
+# 4. 真实麦克风 E2E，验证麦克风采集、ASR 和 TextEdit 注入
+./scripts/e2e-test-mic.sh 10 --distribution --skip-build
+```
+
+Personal 版使用同一套脚本，把 `--distribution` 换成 `--personal`。需要先安装目标版本：
+
+```bash
+./scripts/build-and-install.sh --distribution-only
+./scripts/build-and-install.sh --personal-only
 ```
 
 ### 持续测试模式
@@ -72,6 +96,29 @@
 /tmp/voiceinput_visual_tests/
 └── visual_test_report_*.json  # JSON 结构化报告
 ```
+
+### E2E 结果文件
+E2E 脚本会写入：
+
+```bash
+/tmp/voiceinput_e2e_result.json
+```
+
+`e2e-test-mic.sh` 会额外写入麦克风采集诊断：
+
+```json
+{
+  "diagnostics": {
+    "pcmPackets": 104,
+    "pcmBytes": 332320
+  }
+}
+```
+
+含义：
+- `pcmPackets > 0` 且 `pcmBytes > 0`：App 已经采集并向 ASR 发送 PCM 音频。
+- `pcmPackets = 0` 或 `pcmBytes = 0`：优先检查麦克风输入设备、权限、录音窗口时机。
+- `pcmPackets > 0` 但 `recognized` 为空：音频送出去了，但 ASR 没返回可用文本；优先检查说话音量、语音时机、背景噪声和 ASR 服务状态。
 
 ### 查看报告
 测试完成后会自动打开 HTML 报告，也可以手动打开：
@@ -123,7 +170,9 @@ open /tmp/voiceinput_test_results/report_*.html
 ```bash
 # 运行所有测试（包括真实麦克风）
 ./scripts/comprehensive-test.sh
-./scripts/e2e-test-mic.sh 10  # 10秒录音测试
+./scripts/paste-smoke-test.sh --distribution --no-relaunch
+./scripts/e2e-test-app.sh --distribution --skip-build
+./scripts/e2e-test-mic.sh 10 --distribution --skip-build
 ```
 
 ## 测试覆盖
@@ -167,7 +216,9 @@ open /tmp/voiceinput_test_results/report_*.html
 **原因：** E2E 测试后 app 自动退出
 **解决：** 重新启动 app
 ```bash
-open ~/Applications/VoiceInput.app
+open /Applications/VoiceInput.app
+# 或个人版：
+open ~/Applications/VoiceInput\ Personal.app
 ```
 
 ### 测试失败：无法访问菜单栏
@@ -182,6 +233,13 @@ open ~/Applications/VoiceInput.app
 **解决：**
 1. 检查网络连接
 2. 验证 `Sources/VoiceInput/Config.swift` 中的 API 配置
+
+### 真实麦克风 E2E 没有识别文字
+先查看脚本输出里的 `诊断`，或打开 `/tmp/voiceinput_e2e_result.json`。
+
+- `pcmPackets = 0` 或 `pcmBytes = 0`：测试期间没有采集到 PCM 数据。检查系统输入设备、麦克风权限，以及是否在录音窗口内说话。
+- `pcmPackets > 0` 且 `recognized` 为空：音频已经发送给 ASR，但服务端没有返回文本。重新用更清晰、更长的句子测试；如果持续复现，再检查网络和 ASR 服务状态。
+- `recognized` 有值但 `documentText` 为空：识别成功但粘贴失败，优先跑 `./scripts/paste-smoke-test.sh --distribution --no-relaunch`。
 
 ### Python 环境问题
 **解决：** 重新创建虚拟环境

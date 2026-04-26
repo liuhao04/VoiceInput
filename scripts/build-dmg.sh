@@ -69,11 +69,26 @@ if [ -f "$PROJECT_DIR/Assets/AppIcon.icns" ]; then
 fi
 
 # ---------- 签名 ----------
-SIGNING_IDENTITY="Developer ID Application"
+# 与 build-and-install.sh 保持一致：优先 Developer ID Application，其次显式 SIGNING_IDENTITY。
+# Distribution DMG 必须签名；这里不支持 SIGNING_IDENTITY=none。
+if [ "$SIGNING_IDENTITY" = "none" ]; then
+    echo "❌ Distribution DMG 必须签名，不能使用 SIGNING_IDENTITY=none"
+    exit 1
+elif [ -n "$SIGNING_IDENTITY" ]; then
+    SIGN_IDENTITY_EFFECTIVE="$SIGNING_IDENTITY"
+else
+    SIGN_IDENTITY_EFFECTIVE=$(security find-identity -v -p codesigning 2>/dev/null | grep "Developer ID Application" | head -1 | sed 's/.*"\(.*\)"/\1/' || true)
+fi
+
+if [ -z "$SIGN_IDENTITY_EFFECTIVE" ]; then
+    echo "❌ 未找到 Developer ID Application 签名证书"
+    echo "   请安装 Developer ID Application 证书，或通过 SIGNING_IDENTITY 指定分发签名身份。"
+    exit 1
+fi
 
 echo "▶ 代码签名..."
 codesign --deep --force --options runtime \
-    --sign "$SIGNING_IDENTITY" \
+    --sign "$SIGN_IDENTITY_EFFECTIVE" \
     --entitlements "$ENTITLEMENTS" \
     "$APP_BUNDLE"
 
@@ -100,7 +115,7 @@ hdiutil create -volname "VoiceInput" \
 rm -rf "$DMG_STAGING"
 
 # 签名 DMG
-codesign --force --sign "$SIGNING_IDENTITY" "$DMG_PATH"
+codesign --force --sign "$SIGN_IDENTITY_EFFECTIVE" "$DMG_PATH"
 echo "  DMG 已签名 ✓"
 
 # ---------- 公证 ----------

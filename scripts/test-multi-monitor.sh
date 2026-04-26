@@ -1,15 +1,30 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/app-target.sh"
+
+TARGET="distribution"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --distribution) TARGET="distribution"; shift ;;
+        --personal) TARGET="personal"; shift ;;
+        -h|--help)
+            echo "Usage: ./scripts/test-multi-monitor.sh [--distribution|--personal]"
+            voiceinput_target_usage
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+voiceinput_configure_target "$TARGET"
 
 echo "=== 多显示器面板定位测试 ==="
 echo ""
 
 # 1. 检查应用是否运行
-if ! pgrep -x "VoiceInput" > /dev/null; then
-    echo "❌ VoiceInput 未运行，请先启动应用"
-    exit 1
-fi
-echo "✅ VoiceInput 正在运行"
+voiceinput_require_installed
+voiceinput_print_target
 
 # 2. 检查显示器数量
 SCREEN_COUNT=$(system_profiler SPDisplaysDataType | grep -c "Resolution:")
@@ -89,11 +104,11 @@ APPLESCRIPT
 # 6. 重启 VoiceInput 进入测试模式
 echo ""
 echo "重启 VoiceInput 进入多显示器测试模式..."
-killall VoiceInput 2>/dev/null || true
+voiceinput_kill_target
 sleep 0.5
 
 # 7. 启动测试
-"$HOME/Applications/VoiceInput.app/Contents/MacOS/VoiceInput" --test-multi-monitor > /dev/null 2>&1 &
+"$VOICEINPUT_EXE" --test-multi-monitor > /dev/null 2>&1 &
 TEST_PID=$!
 echo "VoiceInput 测试进程: $TEST_PID"
 
@@ -107,7 +122,7 @@ echo ""
 echo "========== 测试日志 =========="
 echo ""
 echo "查找光标位置相关日志:"
-tail -100 ~/Library/Logs/VoiceInput.log | grep -E "\[MULTI-MONITOR\]|cursorOrMouseScreenPoint|show\(near:|屏幕|Screen" | tail -30
+tail -100 "$VOICEINPUT_LOG_FILE" | grep -E "\[MULTI-MONITOR\]|cursorOrMouseScreenPoint|show\(near:|屏幕|Screen" | tail -30
 
 echo ""
 echo "========== 测试说明 =========="

@@ -1,6 +1,85 @@
 import AppKit
 import Foundation
 
+private final class E2ETextAccumulator: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = ""
+
+    func set(_ text: String) {
+        lock.lock()
+        value = text
+        lock.unlock()
+    }
+
+    func snapshot() -> String {
+        lock.lock()
+        let text = value
+        lock.unlock()
+        return text
+    }
+}
+
+private final class E2EAudioCaptureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var capture: AudioCapture?
+
+    func set(_ capture: AudioCapture?) {
+        lock.lock()
+        self.capture = capture
+        lock.unlock()
+    }
+
+    func stopAndClear() {
+        lock.lock()
+        let current = capture
+        capture = nil
+        lock.unlock()
+        current?.stop()
+    }
+}
+
+private struct E2EAudioDiagnosticsSnapshot: Encodable {
+    let pcmPackets: Int
+    let pcmBytes: Int
+
+    var logSummary: String {
+        "pcmPackets=\(pcmPackets), pcmBytes=\(pcmBytes)"
+    }
+}
+
+private final class E2EAudioDiagnostics: @unchecked Sendable {
+    private let lock = NSLock()
+    private var packetCount = 0
+    private var totalBytes = 0
+
+    func record(_ pcm: Data) {
+        lock.lock()
+        packetCount += 1
+        totalBytes += pcm.count
+        lock.unlock()
+    }
+
+    func snapshot() -> E2EAudioDiagnosticsSnapshot {
+        lock.lock()
+        let packets = packetCount
+        let bytes = totalBytes
+        lock.unlock()
+
+        return E2EAudioDiagnosticsSnapshot(
+            pcmPackets: packets,
+            pcmBytes: bytes
+        )
+    }
+}
+
+private struct E2EResult: Encodable {
+    let recognized: String
+    let documentText: String
+    let success: Bool
+    let error: String?
+    let diagnostics: E2EAudioDiagnosticsSnapshot?
+}
+
 /// 端到端测试：用本地音频 mock 识别，粘贴到 TextEdit，并验证是否写入成功（仅用于测试 App）
 enum E2ETest {
     private static let resultPath = "/tmp/voiceinput_e2e_result.json"
@@ -44,18 +123,18 @@ enum E2ETest {
         return desc.stringValue ?? ""
     }
 
-    static func writeResult(recognized: String, documentText: String, error: String?) {
+    private static func writeResult(recognized: String, documentText: String, error: String?, diagnostics: E2EAudioDiagnosticsSnapshot? = nil) {
         let trimmed = recognized.trimmingCharacters(in: .whitespacesAndNewlines)
         let ok = error == nil && (trimmed.isEmpty ? true : documentText.contains(trimmed))
-        let dict: [String: Any] = [
-            "recognized": recognized,
-            "documentText": documentText,
-            "success": ok,
-            "error": error as Any
-        ]
-        guard let json = try? JSONSerialization.data(withJSONObject: dict),
-              let str = String(data: json, encoding: .utf8) else { return }
-        try? str.write(toFile: resultPath, atomically: true, encoding: .utf8)
+        let result = E2EResult(
+            recognized: recognized,
+            documentText: documentText,
+            success: ok,
+            error: error,
+            diagnostics: diagnostics
+        )
+        guard let json = try? JSONEncoder().encode(result) else { return }
+        try? json.write(to: URL(fileURLWithPath: resultPath), options: .atomic)
     }
 
     /// 运行 E2E：加载 PCM → ASR → 粘贴到 TextEdit → 写出结果并 exit
@@ -83,21 +162,21 @@ enum E2ETest {
         textEditApp.activate(options: [.activateIgnoringOtherApps])
         Thread.sleep(forTimeInterval: 0.5)
 
-        let accumulated = NSMutableString()
+        let accumulated = E2ETextAccumulator()
         let asr = VolcanoASR()
         asr.start(
             onText: { text, _ in
-                DispatchQueue.main.async { accumulated.setString(text) }
+                accumulated.set(text)
             },
             onError: { err in
-                writeResult(recognized: accumulated as String, documentText: "", error: err.localizedDescription)
+                writeResult(recognized: accumulated.snapshot(), documentText: "", error: err.localizedDescription)
                 completion(1)
             },
             onReady: {
                 sendPCMInChunks(asr: asr, data: pcmData) {
                     asr.stop()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        let text = (accumulated as String).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let text = accumulated.snapshot().trimmingCharacters(in: .whitespacesAndNewlines)
                         PasteboardPaste.paste(text: text, activateTarget: textEditApp)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             let docText = getTextEditDocument1Content()
@@ -144,42 +223,45 @@ enum E2ETest {
         textEditApp.activate(options: [.activateIgnoringOtherApps])
         Thread.sleep(forTimeInterval: 0.5)
 
-        let accumulated = NSMutableString()
-        var audioCapture: AudioCapture?
+        let accumulated = E2ETextAccumulator()
+        let audioCapture = E2EAudioCaptureBox()
+        let diagnostics = E2EAudioDiagnostics()
         let asr = VolcanoASR()
         asr.start(
             onText: { text, _ in
-                DispatchQueue.main.async { accumulated.setString(text) }
+                accumulated.set(text)
             },
             onError: { err in
-                writeResult(recognized: accumulated as String, documentText: "", error: err.localizedDescription)
+                writeResult(recognized: accumulated.snapshot(), documentText: "", error: err.localizedDescription)
                 completion(1)
             },
             onReady: {
                 do {
                     let capture = AudioCapture()
-                    audioCapture = capture
+                    audioCapture.set(capture)
                     try capture.start { pcm in
+                        diagnostics.record(pcm)
                         asr.sendPCM(pcm)
                     }
                 } catch {
-                    writeResult(recognized: accumulated as String, documentText: "", error: "麦克风启动失败: \(error.localizedDescription)")
+                    writeResult(recognized: accumulated.snapshot(), documentText: "", error: "麦克风启动失败: \(error.localizedDescription)", diagnostics: diagnostics.snapshot())
                     completion(1)
                     return
                 }
                 // N 秒后自动停止
                 let sec = max(1, min(seconds, 30))
                 DispatchQueue.main.asyncAfter(deadline: .now() + Double(sec)) {
-                    audioCapture?.stop()
-                    audioCapture = nil
+                    audioCapture.stopAndClear()
                     asr.stop()
                     DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
-                        let text = (accumulated as String).trimmingCharacters(in: .whitespacesAndNewlines)
+                        let text = accumulated.snapshot().trimmingCharacters(in: .whitespacesAndNewlines)
+                        let audioDiagnostics = diagnostics.snapshot()
+                        Log.log("[E2E-Mic] diagnostics: \(audioDiagnostics.logSummary)")
                         PasteboardPaste.paste(text: text, activateTarget: textEditApp)
                         DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) {
                             let docText = getTextEditDocument1Content()
                             let ok = !text.isEmpty && docText.contains(text)
-                            writeResult(recognized: text, documentText: docText, error: ok ? nil : "文档中未找到识别结果")
+                            writeResult(recognized: text, documentText: docText, error: ok ? nil : "文档中未找到识别结果", diagnostics: audioDiagnostics)
                             completion(ok ? 0 : 1)
                         }
                     }

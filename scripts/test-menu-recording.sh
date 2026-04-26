@@ -1,19 +1,36 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # 自动测试菜单点击启动录音功能
 
-set -e
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
+source "$SCRIPT_DIR/app-target.sh"
+
+TARGET="distribution"
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --distribution) TARGET="distribution"; shift ;;
+        --personal) TARGET="personal"; shift ;;
+        -h|--help)
+            echo "Usage: ./scripts/test-menu-recording.sh [--distribution|--personal]"
+            voiceinput_target_usage
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+voiceinput_configure_target "$TARGET"
+
 TEST_DIR="/tmp/voiceinput_menu_test"
-APP_PATH="$HOME/Applications/VoiceInput.app"
 
 mkdir -p "$TEST_DIR"
 
 echo "[Test] 1. 确保 app 正在运行..."
-pkill -9 VoiceInput 2>/dev/null || true
+voiceinput_require_installed
+voiceinput_kill_target
 sleep 0.5
-open "$APP_PATH"
+open "$VOICEINPUT_APP_PATH"
 sleep 3
 
 echo "[Test] 2. 截图初始状态（应该没有录音）..."
@@ -21,7 +38,8 @@ screencapture -x -R 0,0,1200,30 "$TEST_DIR/menubar_before.png"
 
 # 清空日志相关行，以便后续检测
 echo "[Test] 3. 记录当前日志行数..."
-LOG_FILE=~/Library/Logs/VoiceInput.log
+LOG_FILE="$VOICEINPUT_LOG_FILE"
+touch "$LOG_FILE"
 BEFORE_LINE_COUNT=$(wc -l < "$LOG_FILE")
 
 echo "[Test] 4. 使用 AppleScript 点击菜单并启动录音..."

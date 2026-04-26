@@ -2,6 +2,237 @@ import AppKit
 
 /// 测试功能：从 VoiceInputApp.swift 提取，通过 --test-* 命令行参数触发
 extension AppDelegate {
+    private struct PasteSmokeCheck: Encodable {
+        let name: String
+        let status: String
+        let detail: String
+    }
+
+    private struct PasteSmokeReport: Encodable {
+        let success: Bool
+        let checks: [PasteSmokeCheck]
+        let logFile: String
+        let durationSeconds: Double
+    }
+
+    private struct PasteSmokeClipboardSnapshot {
+        let items: [[(type: NSPasteboard.PasteboardType, data: Data)]]
+    }
+
+    // MARK: - 粘贴冒烟测试
+
+    func runPasteSmokeTest() {
+        Log.log("[PASTE-SMOKE] ========== 开始粘贴冒烟测试 ==========")
+
+        let started = Date()
+        let includeITerm2 = CommandLine.arguments.contains("--include-iterm2")
+        var checks: [PasteSmokeCheck] = []
+        let snapshot = savePasteSmokeClipboard()
+        let baseline = "VOICEINPUT_SMOKE_CLIPBOARD_\(Int(Date().timeIntervalSince1970))"
+
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(baseline, forType: .string)
+
+        runTextEditPasteSmokeTest { textEditCheck in
+            checks.append(textEditCheck)
+
+            let runFinalChecks: () -> Void = {
+                let clipboardValue = NSPasteboard.general.string(forType: .string)
+                if clipboardValue == baseline {
+                    checks.append(PasteSmokeCheck(
+                        name: "clipboard_restore",
+                        status: "pass",
+                        detail: "剪贴板在粘贴后恢复到测试前基线"
+                    ))
+                } else {
+                    checks.append(PasteSmokeCheck(
+                        name: "clipboard_restore",
+                        status: "fail",
+                        detail: "剪贴板未恢复到测试基线，当前值: \(clipboardValue ?? "nil")"
+                    ))
+                }
+
+                self.restorePasteSmokeClipboard(snapshot)
+                self.finishPasteSmokeTest(checks: checks, started: started)
+            }
+
+            if includeITerm2 {
+                self.runITerm2PasteSmokeTest {
+                    checks.append($0)
+                    runFinalChecks()
+                }
+            } else {
+                checks.append(PasteSmokeCheck(
+                    name: "iterm2",
+                    status: "skipped",
+                    detail: "默认跳过；使用 --include-iterm2 会向当前 iTerm2 会话粘贴一段无换行测试文本"
+                ))
+                runFinalChecks()
+            }
+        }
+    }
+
+    private func runTextEditPasteSmokeTest(completion: @escaping (PasteSmokeCheck) -> Void) {
+        let marker = "VOICEINPUT_SMOKE_TEXTEDIT_\(Int(Date().timeIntervalSince1970))"
+        Log.log("[PASTE-SMOKE] TextEdit marker: \(marker)")
+
+        NSWorkspace.shared.open(URL(fileURLWithPath: "/System/Applications/TextEdit.app"))
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) {
+            guard let textEdit = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.apple.TextEdit" }) else {
+                completion(PasteSmokeCheck(name: "textedit", status: "fail", detail: "无法启动或找到 TextEdit"))
+                return
+            }
+
+            self.prepareTextEditDocument()
+            textEdit.activate(options: .activateIgnoringOtherApps)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                PasteboardPaste.paste(text: marker, activateTarget: textEdit)
+
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {
+                    let content = self.readTextEditFrontDocument()
+                    self.closeTextEditFrontDocument()
+
+                    if content.contains(marker) {
+                        completion(PasteSmokeCheck(name: "textedit", status: "pass", detail: "TextEdit 收到测试文本"))
+                    } else {
+                        completion(PasteSmokeCheck(name: "textedit", status: "fail", detail: "TextEdit 未包含 marker，内容: \(content.prefix(80))"))
+                    }
+                }
+            }
+        }
+    }
+
+    private func runITerm2PasteSmokeTest(completion: @escaping (PasteSmokeCheck) -> Void) {
+        let marker = "VOICEINPUT_SMOKE_ITERM2_\(Int(Date().timeIntervalSince1970))"
+        Log.log("[PASTE-SMOKE] iTerm2 marker: \(marker)")
+
+        guard let iterm2 = NSWorkspace.shared.runningApplications.first(where: { $0.bundleIdentifier == "com.googlecode.iterm2" }) else {
+            completion(PasteSmokeCheck(name: "iterm2", status: "skipped", detail: "未找到正在运行的 iTerm2"))
+            return
+        }
+
+        PasteboardPaste.paste(text: marker, activateTarget: iterm2)
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) {
+            completion(PasteSmokeCheck(
+                name: "iterm2",
+                status: "pass",
+                detail: "已触发 iTerm2 粘贴路径；该测试会在当前会话输入无换行 marker"
+            ))
+        }
+    }
+
+    private func finishPasteSmokeTest(checks: [PasteSmokeCheck], started: Date) {
+        let success = checks.allSatisfy { $0.status == "pass" || $0.status == "skipped" }
+        let report = PasteSmokeReport(
+            success: success,
+            checks: checks,
+            logFile: Log.logFileURL.path,
+            durationSeconds: Date().timeIntervalSince(started)
+        )
+
+        let resultPath = "/tmp/voiceinput_paste_smoke_result.json"
+        do {
+            let encoder = JSONEncoder()
+            encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+            let data = try encoder.encode(report)
+            try data.write(to: URL(fileURLWithPath: resultPath))
+            Log.log("[PASTE-SMOKE] 已写入结果: \(resultPath)")
+        } catch {
+            Log.log("[PASTE-SMOKE] ❌ 写入结果失败: \(error)")
+        }
+
+        Log.log("[PASTE-SMOKE] ========== 粘贴冒烟测试\(success ? "成功" : "失败") ==========")
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func prepareTextEditDocument() {
+        let script = """
+        tell application "TextEdit"
+            activate
+            make new document
+            set text of front document to ""
+        end tell
+        """
+        _ = runPasteSmokeAppleScript(script)
+    }
+
+    private func readTextEditFrontDocument() -> String {
+        let script = """
+        tell application "TextEdit"
+            if it is running then
+                try
+                    return text of front document
+                on error
+                    return ""
+                end try
+            end if
+            return ""
+        end tell
+        """
+        return runPasteSmokeAppleScript(script) ?? ""
+    }
+
+    private func closeTextEditFrontDocument() {
+        let script = """
+        tell application "TextEdit"
+            if it is running then
+                try
+                    close front document saving no
+                end try
+            end if
+        end tell
+        """
+        _ = runPasteSmokeAppleScript(script)
+    }
+
+    private func runPasteSmokeAppleScript(_ source: String) -> String? {
+        guard let script = NSAppleScript(source: source) else { return nil }
+        var error: NSDictionary?
+        let result = script.executeAndReturnError(&error)
+        if let error {
+            Log.log("[PASTE-SMOKE] AppleScript 错误: \(error)")
+            return nil
+        }
+        return result.stringValue
+    }
+
+    private func savePasteSmokeClipboard() -> PasteSmokeClipboardSnapshot? {
+        guard let items = NSPasteboard.general.pasteboardItems, !items.isEmpty else { return nil }
+
+        var savedItems: [[(type: NSPasteboard.PasteboardType, data: Data)]] = []
+        for item in items {
+            var itemData: [(type: NSPasteboard.PasteboardType, data: Data)] = []
+            for type in item.types {
+                if let data = item.data(forType: type) {
+                    itemData.append((type: type, data: data))
+                }
+            }
+            if !itemData.isEmpty {
+                savedItems.append(itemData)
+            }
+        }
+
+        return savedItems.isEmpty ? nil : PasteSmokeClipboardSnapshot(items: savedItems)
+    }
+
+    private func restorePasteSmokeClipboard(_ snapshot: PasteSmokeClipboardSnapshot?) {
+        NSPasteboard.general.clearContents()
+        guard let snapshot else { return }
+
+        let items = snapshot.items.map { itemData in
+            let item = NSPasteboardItem()
+            for entry in itemData {
+                item.setData(entry.data, forType: entry.type)
+            }
+            return item
+        }
+        NSPasteboard.general.writeObjects(items)
+    }
 
     // MARK: - 右Option键测试
 

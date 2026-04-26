@@ -1,93 +1,59 @@
 #!/usr/bin/env bash
-# 测试粘贴功能是否正常工作
-set -e
+# 粘贴功能测试：检查终端辅助功能权限、剪贴板，并运行真实 app 粘贴冒烟测试。
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/app-target.sh"
+
+TARGET="distribution"
+INCLUDE_ITERM2=0
+
+usage() {
+  cat <<'USAGE'
+Usage: ./scripts/test-paste.sh [--distribution|--personal] [--include-iterm2]
+USAGE
+  voiceinput_target_usage
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --distribution) TARGET="distribution"; shift ;;
+    --personal) TARGET="personal"; shift ;;
+    --include-iterm2) INCLUDE_ITERM2=1; shift ;;
+    -h|--help) usage; exit 0 ;;
+    *) echo "Unknown argument: $1" >&2; usage >&2; exit 2 ;;
+  esac
+done
+
+voiceinput_configure_target "$TARGET"
 
 echo "测试自动粘贴功能"
 echo "================="
+voiceinput_print_target
 echo ""
 
-# 1. 检查辅助功能权限
-echo "[1/4] 检查辅助功能权限..."
+echo "[1/3] 检查当前终端的辅助功能权限..."
 if ! osascript -e 'tell application "System Events" to keystroke "test"' 2>/dev/null; then
-    echo "❌ 辅助功能权限未授予"
-    echo ""
-    echo "请按以下步骤授予权限："
-    echo "1. 打开：系统偏好设置 → 安全性与隐私 → 隐私 → 辅助功能"
-    echo "2. 点击左下角锁图标解锁"
-    echo "3. 勾选：Terminal 或 iTerm（你正在使用的终端）"
-    echo "4. 如果找不到 VoiceInput.app，点击 + 添加："
-    echo "   ~/Applications/VoiceInput.app"
-    echo ""
-    exit 1
-else
-    echo "✓ 辅助功能权限已授予（终端）"
+  echo "FAIL: 当前终端没有辅助功能权限。请在 系统设置 → 隐私与安全性 → 辅助功能 中勾选 Terminal/iTerm。"
+  exit 1
 fi
+echo "PASS: 当前终端可发送辅助功能事件"
 
-# 2. 检查 VoiceInput 是否有辅助功能权限
 echo ""
-echo "[2/4] 检查 VoiceInput.app 辅助功能权限..."
-
-# 使用 tccutil 检查（macOS 13+）
-if command -v tccutil &> /dev/null; then
-    # 重置并重新请求权限
-    echo "提示：如果 VoiceInput 没有辅助功能权限，请手动添加"
-    echo "路径：~/Applications/VoiceInput.app"
+echo "[2/3] 测试剪贴板读写..."
+TEST_TEXT="VOICEINPUT_CLIPBOARD_TEST_$(date +%s)"
+printf "%s" "$TEST_TEXT" | pbcopy
+CLIPBOARD_CONTENT="$(pbpaste)"
+if [[ "$CLIPBOARD_CONTENT" != "$TEST_TEXT" ]]; then
+  echo "FAIL: 剪贴板读写失败"
+  exit 1
 fi
+echo "PASS: 剪贴板读写正常"
 
-# 3. 测试剪贴板
 echo ""
-echo "[3/4] 测试剪贴板功能..."
-TEST_TEXT="测试文本 $(date +%s)"
-osascript -e "set the clipboard to \"$TEST_TEXT\""
-CLIPBOARD_CONTENT=$(osascript -e "the clipboard")
-
-if [ "$CLIPBOARD_CONTENT" = "$TEST_TEXT" ]; then
-    echo "✓ 剪贴板读写正常"
-else
-    echo "❌ 剪贴板测试失败"
-    exit 1
+echo "[3/3] 运行真实 app 粘贴冒烟测试..."
+args=(--target "$TARGET")
+if [[ "$INCLUDE_ITERM2" -eq 1 ]]; then
+  args+=(--include-iterm2)
 fi
-
-# 4. 测试 Cmd+V 模拟
-echo ""
-echo "[4/4] 测试 Cmd+V 模拟..."
-echo "打开 TextEdit 并创建新文档..."
-
-osascript <<'EOF'
-tell application "TextEdit"
-    activate
-    make new document
-    delay 0.5
-end tell
-
-tell application "System Events"
-    keystroke "v" using command down
-    delay 0.3
-end tell
-
-tell application "TextEdit"
-    set docText to text of document 1
-    return docText
-end tell
-EOF
-
-DOC_TEXT=$(osascript -e 'tell application "TextEdit" to get text of document 1' 2>/dev/null || echo "")
-
-if [[ "$DOC_TEXT" == *"$TEST_TEXT"* ]]; then
-    echo "✓ Cmd+V 模拟成功，文本已粘贴"
-    echo "  粘贴内容: $DOC_TEXT"
-else
-    echo "❌ Cmd+V 模拟失败"
-    echo "  期望: $TEST_TEXT"
-    echo "  实际: $DOC_TEXT"
-    exit 1
-fi
-
-echo ""
-echo "================="
-echo "✅ 所有粘贴功能测试通过！"
-echo ""
-echo "如果 VoiceInput 仍然无法自动粘贴，请："
-echo "1. 确保 VoiceInput.app 在辅助功能权限列表中"
-echo "2. 重启 VoiceInput.app"
-echo "3. 查看日志：tail -f ~/Library/Logs/VoiceInput.log"
+"$SCRIPT_DIR/paste-smoke-test.sh" "${args[@]}"

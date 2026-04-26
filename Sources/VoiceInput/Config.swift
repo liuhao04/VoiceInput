@@ -121,18 +121,22 @@ enum Config {
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
 
+    /// Personal 版"从分发版迁移 credentials.json"只执行一次的标记。
+    /// 独立于 UserDefaults 迁移，避免已跑过旧迁移逻辑的用户被跳过。
+    private static let personalCredentialsMigrationKey = "personalCredentialsMigratedFromDistribution_v1"
+
     /// 从旧版 `asrWebSocketURL` 字符串迁移到 `asrMode` 枚举，只执行一次
     private static let asrModeMigrationKey = "asrModeMigratedFromURL_v1"
 
     /// 分发版固定 bundle ID（用于 Personal 版迁移源识别）
     private static let distributionBundleID = "com.voiceinput.mac"
 
-    /// 启动时执行一次性 UserDefaults 迁移。凭证存储走 CredentialsStore 文件，
-    /// 完全不碰 macOS Keychain（原因见 CLAUDE.md "Keychain: Don't Use It"），
-    /// 所以这里没有 Keychain 读写路径。
+    /// 启动时执行一次性迁移。凭证存储走 CredentialsStore 文件，
+    /// 完全不碰 macOS Keychain（原因见 CLAUDE.md "Keychain: Don't Use It"）。
     static func migrateOnLaunchIfNeeded() {
         migrateAsrModeFromLegacyURLIfNeeded()
         migratePersonalFromDistributionIfNeeded()
+        migratePersonalCredentialsFromDistributionIfNeeded()
     }
 
     /// 旧版本让用户手填完整 WebSocket URL。现在改成在"双向流式优化版"与"流式输入"之间
@@ -149,7 +153,6 @@ enum Config {
     }
 
     /// Personal 版首次启动时，从分发版拷贝 **UserDefaults**（触发键、语言、mode 等）。
-    /// 凭证不在这里 —— 凭证用 CredentialsStore 文件独立存，不跨版本迁移。
     private static func migratePersonalFromDistributionIfNeeded() {
         let bundleID = Bundle.main.bundleIdentifier ?? ""
         let isPersonal = bundleID == "\(distributionBundleID).personal"
@@ -176,6 +179,47 @@ enum Config {
 
         UserDefaults.standard.set(true, forKey: personalMigrationKey)
         Log.log("[Config] Personal 版已从分发版迁移 UserDefaults 配置")
+    }
+
+    /// Personal 版首次启动时，从 Distribution 的 Application Support 凭证文件复制缺失项。
+    /// 只填补 Personal 当前缺失的 key，不覆盖用户已经在 Personal 中保存的新凭证。
+    private static func migratePersonalCredentialsFromDistributionIfNeeded() {
+        let bundleID = Bundle.main.bundleIdentifier ?? ""
+        let isPersonal = bundleID == "\(distributionBundleID).personal"
+        guard isPersonal else { return }
+        guard !UserDefaults.standard.bool(forKey: personalCredentialsMigrationKey) else { return }
+
+        let sourceURL = CredentialsStore.fileURL(forBundleName: "VoiceInput")
+        let source = CredentialsStore.load(from: sourceURL)
+        guard !source.isEmpty else {
+            UserDefaults.standard.set(true, forKey: personalCredentialsMigrationKey)
+            Log.log("[Config] Personal 版未找到分发版 credentials.json，跳过凭证迁移")
+            return
+        }
+
+        var target = CredentialsStore.load()
+        var copied = 0
+        for key in [volcAppIdKey, volcAccessTokenKey, boostingTableIdKey, replaceWordsIdKey] {
+            guard (target[key]?.isEmpty ?? true), let value = source[key], !value.isEmpty else {
+                continue
+            }
+            target[key] = value
+            copied += 1
+        }
+
+        if copied > 0 {
+            do {
+                try CredentialsStore.save(target)
+                Log.log("[Config] Personal 版已从分发版迁移 \(copied) 项凭证")
+            } catch {
+                Log.log("[Config] Personal 版凭证迁移失败: \(error)")
+                return
+            }
+        } else {
+            Log.log("[Config] Personal 版凭证无需迁移")
+        }
+
+        UserDefaults.standard.set(true, forKey: personalCredentialsMigrationKey)
     }
 
     /// 从 Info.plist 读取（短版本 + 构建号），未打包时返回开发版本

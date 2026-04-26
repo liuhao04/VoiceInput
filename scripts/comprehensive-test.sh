@@ -72,7 +72,7 @@ sleep 2
 
 # 测试 2: App 安装验证
 echo -e "${BLUE}[2/12]${NC} App 安装验证..."
-APP_PATH="$HOME/Applications/VoiceInput.app"
+APP_PATH="/Applications/VoiceInput.app"
 if [ -d "$APP_PATH" ] && [ -f "$APP_PATH/Contents/MacOS/VoiceInput" ] && [ -x "$APP_PATH/Contents/MacOS/VoiceInput" ]; then
     APP_SIZE=$(du -sh "$APP_PATH" | cut -f1)
     record_test "安装验证" "pass" "路径: $APP_PATH, 大小: $APP_SIZE"

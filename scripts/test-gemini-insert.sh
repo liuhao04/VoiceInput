@@ -1,18 +1,35 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+source "$SCRIPT_DIR/app-target.sh"
+
+TARGET="distribution"
+BROWSER="Safari"
+
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --distribution) TARGET="distribution"; shift ;;
+        --personal) TARGET="personal"; shift ;;
+        Safari|"Google Chrome") BROWSER="$1"; shift ;;
+        -h|--help)
+            echo "Usage: ./scripts/test-gemini-insert.sh [Safari|Google Chrome] [--distribution|--personal]"
+            voiceinput_target_usage
+            exit 0
+            ;;
+        *) echo "Unknown argument: $1" >&2; exit 2 ;;
+    esac
+done
+voiceinput_configure_target "$TARGET"
 
 echo "=== Gemini 页面语音插入测试 ==="
 echo ""
 
 # 1. 检查应用是否运行
-if ! pgrep -x "VoiceInput" > /dev/null; then
-    echo "❌ VoiceInput 未运行，请先启动应用"
-    exit 1
-fi
-echo "✅ VoiceInput 正在运行"
+voiceinput_require_installed
+voiceinput_print_target
 
 # 2. 检查浏览器选择
-BROWSER="${1:-Safari}"
 if [[ "$BROWSER" != "Safari" && "$BROWSER" != "Google Chrome" ]]; then
     echo "❌ 不支持的浏览器: $BROWSER"
     echo "用法: $0 [Safari|Google Chrome]"
@@ -114,11 +131,11 @@ echo "Gemini测试文字：你好世界" > /tmp/voiceinput_test/test_text.txt
 # 7. 停止当前运行的 VoiceInput
 echo ""
 echo "重启 VoiceInput 进入测试模式..."
-killall VoiceInput 2>/dev/null || true
+voiceinput_kill_target
 sleep 0.5
 
 # 8. 以测试模式启动
-"$HOME/Applications/VoiceInput.app/Contents/MacOS/VoiceInput" --test-gemini > /dev/null 2>&1 &
+"$VOICEINPUT_EXE" --test-gemini > /dev/null 2>&1 &
 TEST_PID=$!
 echo "VoiceInput 测试进程: $TEST_PID"
 
@@ -134,7 +151,7 @@ echo "========== 测试结果 =========="
 # 读取日志
 echo ""
 echo "最近的日志："
-tail -50 ~/Library/Logs/VoiceInput.log | grep -E "\[TEST\]|\[Paste\]|将注入" | tail -20
+tail -50 "$VOICEINPUT_LOG_FILE" | grep -E "\[TEST\]|\[Paste\]|将注入" | tail -20
 
 # 11. 尝试读取浏览器中的内容
 echo ""

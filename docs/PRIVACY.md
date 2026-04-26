@@ -12,7 +12,7 @@ VoiceInput 是一个开源的 macOS 菜单栏语音输入工具。本政策说�
 |---|---|---|---|
 | **麦克风音频** | 不存储 | 仅在录音过程中实时加密流式发送给火山引擎 ASR 服务完成识别 | 录音停止后内存中的音频即被释放；本应用不会将完整录音写入磁盘，也不会将音频发送到除火山引擎之外的任何服务器 |
 | **识别结果文本** | `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` 下的 JSONL 历史文件 | 不上传 | 位于 iCloud Drive 目录，是否同步到 Apple iCloud 由你的 macOS 系统设置决定（不是本应用的行为）。你可以随时删除该目录清空历史 |
-| **凭证**（火山引擎 App ID / Access Token / Resource ID / 热词表 ID） | `~/Library/Application Support/VoiceInput/credentials.json`（权限 `0600`） | 不上传 | 仅在调用火山引擎 API 时作为身份认证头发送给火山引擎 |
+| **凭证**（火山引擎 App ID / Access Token / Resource ID / 热词表 ID） | `~/Library/Application Support/<App Name>/credentials.json`（权限 `0600`，例如 `VoiceInput` 或 `VoiceInput Personal`） | 不上传 | 仅在调用火山引擎 API 时作为身份认证头发送给火山引擎 |
 | **应用设置**（触发键、快捷键、识别模式等） | UserDefaults（`com.voiceinput.mac.plist`） | 不上传 | — |
 | **本地日志** | `~/Library/Logs/VoiceInput.log` | 不上传 | 记录连接状态、错误信息、版本号等调试信息。可从菜单栏 > 打开日志文件查看内容 |
 
@@ -47,7 +47,7 @@ VoiceInput 是一个开源的 macOS 菜单栏语音输入工具。本政策说�
 ## 你的控制权
 
 - **卸载**：删除 `VoiceInput.app` 即卸载。可同时清理下列目录以移除所有本地数据：
-  - `~/Library/Application Support/VoiceInput/`（凭证）
+  - `~/Library/Application Support/VoiceInput/` 和/或 `~/Library/Application Support/VoiceInput Personal/`（凭证）
   - `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`（识别历史）
   - `~/Library/Logs/VoiceInput.log`（日志）
 - **清空识别历史**：手动删除 `history/` 目录中的 JSONL 文件
@@ -71,7 +71,7 @@ VoiceInput is an open-source macOS menu bar voice-to-text tool. This policy desc
 
 - **Microphone audio** is streamed in real time over TLS WebSocket to Volcano Engine's ASR service for transcription. Audio is **not written to disk** by the app. It is released from memory after each recording.
 - **Transcribed text** is stored locally under `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` as JSONL history files. Whether this directory syncs to Apple iCloud is controlled by your macOS system settings, not by this app. You can delete the directory at any time.
-- **Credentials** (Volcano Engine App ID / Access Token / Resource ID / Boosting Table ID) are stored locally at `~/Library/Application Support/VoiceInput/credentials.json` (chmod `0600`) and only sent to Volcano Engine for API authentication.
+- **Credentials** (Volcano Engine App ID / Access Token / Resource ID / Boosting Table ID) are stored locally at `~/Library/Application Support/<App Name>/credentials.json` (chmod `0600`, for example `VoiceInput` or `VoiceInput Personal`) and only sent to Volcano Engine for API authentication.
 - **Logs** (`~/Library/Logs/VoiceInput.log`) contain connection status, errors, and version info. They are not uploaded.
 - **No analytics, telemetry, or crash reporting** of any kind. The project has no server component controlled by the author.
 
@@ -86,7 +86,7 @@ Audio data is sent to [Volcano Engine](https://www.volcengine.com/)'s ASR API fo
 
 ### Your control
 
-- Uninstall by removing `VoiceInput.app`. To wipe all local data, also remove `~/Library/Application Support/VoiceInput/`, `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`, and `~/Library/Logs/VoiceInput.log`.
+- Uninstall by removing `VoiceInput.app`. To wipe all local data, also remove `~/Library/Application Support/VoiceInput/` and/or `~/Library/Application Support/VoiceInput Personal/`, `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`, and the matching log file under `~/Library/Logs/`.
 - Revoke system permissions at any time from **System Settings → Privacy & Security**.
 
 ### Contact

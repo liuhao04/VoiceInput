@@ -39,12 +39,12 @@ cd VoiceInput
 ./scripts/build-and-install.sh
 ```
 
-The script builds a release binary and installs it to `~/Applications/VoiceInput.app`. To customize the install location:
+The script builds release binaries for both isolated local variants:
 
-```bash
-INSTALL_DIR="/Applications" ./scripts/build-and-install.sh
-```
+- **Personal**: `com.voiceinput.mac.personal`, installed at `~/Applications/VoiceInput Personal.app`
+- **Distribution**: `com.voiceinput.mac`, updated in place at `/Applications/VoiceInput.app` when that app already exists
 
+Use `./scripts/build-and-install.sh --personal-only` or `./scripts/build-and-install.sh --distribution-only` to update only one variant. First-time Distribution installs should be done from a DMG built with `./scripts/build-dmg.sh`.
 ## Configuration
 
 ### API Credentials
@@ -70,6 +70,8 @@ export VOLC_BOOSTING_TABLE_ID="your_boosting_table_id"  # optional
 3. (Optional) Create a hotword table in the console to obtain a **Boosting Table ID**. The app sends this ID through on every request; the table itself must be maintained in the Volcano Engine console.
 
 See [docs/PRIVACY.md](docs/PRIVACY.md) for how your audio and credentials are handled.
+
+Credentials are stored locally in `~/Library/Application Support/<App Name>/credentials.json` with file mode `0600`; the app does not use Keychain for these values.
 
 ## Permissions
 
@@ -99,7 +101,7 @@ Sources/VoiceInput/
   PasteboardPaste.swift     # Clipboard paste + restore
   CursorLocator.swift       # Cursor position via Accessibility API
   Config.swift              # Configuration management
-  KeychainHelper.swift      # Secure credential storage
+  CredentialsStore.swift    # Local credentials.json storage
   SettingsWindow.swift      # Settings UI
   HistoryWindow.swift       # Recognition history UI
   Logger.swift              # File logging

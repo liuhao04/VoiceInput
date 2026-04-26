@@ -74,19 +74,15 @@ enum PasteboardPaste {
         // 检测终端类应用，使用键盘事件模拟输入
         let terminalApps = ["com.googlecode.iterm2", "com.apple.Terminal", "com.github.wez.wezterm", "net.kovidgoyal.kitty"]
         if terminalApps.contains(bundleId) {
-            Log.log("[Paste] 检测到终端应用，使用 Unicode 键盘事件")
-            _ = insertTextViaUnicodeKeyboard(text: text)
+            Log.log("[Paste] 检测到终端应用，使用剪贴板 fallback 方案（带恢复）")
+            fallbackToPasteboard(text: text, withRestore: true)
             return
         }
 
-        // 检测 Web 浏览器，先尝试键盘事件，失败则剪贴板（带恢复）
+        // 检测 Web 浏览器：优先使用系统粘贴。Unicode 键盘事件无法可靠验证，容易静默失败。
         let webBrowsers = ["com.apple.Safari", "com.google.Chrome", "org.mozilla.firefox", "com.microsoft.edgemac"]
         if webBrowsers.contains(bundleId) {
-            Log.log("[Paste] 检测到 Web 浏览器，尝试 Unicode 键盘事件")
-            if insertTextViaUnicodeKeyboard(text: text) {
-                return
-            }
-            Log.log("[Paste] Unicode 键盘事件失败，fallback 到剪贴板方案（带恢复）")
+            Log.log("[Paste] 检测到 Web 浏览器，使用剪贴板 fallback 方案（带恢复）")
             fallbackToPasteboard(text: text, withRestore: true)
             return
         }
@@ -99,14 +95,12 @@ enum PasteboardPaste {
 
         if result != .success {
             Log.log("[Paste] ❌ 无法获取焦点元素: \(result.rawValue)")
-            if insertTextViaUnicodeKeyboard(text: text) { return }
             fallbackToPasteboard(text: text, withRestore: true)
             return
         }
 
         guard let focused = focusedElement else {
             Log.log("[Paste] ❌ 焦点元素为空")
-            if insertTextViaUnicodeKeyboard(text: text) { return }
             fallbackToPasteboard(text: text, withRestore: true)
             return
         }
@@ -156,10 +150,7 @@ enum PasteboardPaste {
                         Log.log("[Paste] ⚠️  方法1: API 返回成功但验证失败，value=\"\(value.prefix(50))\", 尝试方法2")
                     }
                 } else {
-                    // 对于某些应用（如 TextEdit），插入后立即读取可能为空，这是正常的
-                    // 所以如果无法验证，我们仍然认为插入成功
-                    Log.log("[Paste] ✅ AX API 插入成功 (方法1: selectedText) - 无法验证但API返回成功")
-                    return
+                    Log.log("[Paste] ⚠️ 方法1: API 返回成功但无法验证，继续尝试其他插入方案")
                 }
             } else {
                 Log.log("[Paste] 方法1失败: \(insertResult.rawValue), 错误描述: \(axErrorDescription(insertResult))")
@@ -224,8 +215,14 @@ enum PasteboardPaste {
 
                 let setResult = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, newValue as CFTypeRef)
                 if setResult == .success {
-                    Log.log("[Paste] ✅ AX API 插入成功 (方法2: 追加)")
-                    return
+                    var verifyValue: CFTypeRef?
+                    if AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &verifyValue) == .success,
+                       let actualValue = verifyValue as? String,
+                       actualValue == newValue {
+                        Log.log("[Paste] ✅ AX API 插入成功并验证 (方法2: 追加)")
+                        return
+                    }
+                    Log.log("[Paste] ⚠️ 方法2追加返回成功但无法验证，继续 fallback")
                 } else {
                     Log.log("[Paste] 方法2失败: \(setResult.rawValue)")
                 }
@@ -235,97 +232,9 @@ enum PasteboardPaste {
         // 尝试方法 3: 检查是否支持 performAction
         Log.log("[Paste] 尝试检查可用 actions（部分应用不支持）")
 
-        // 所有 AX 方法都失败，先尝试键盘事件，再 fallback 到剪贴板
-        Log.log("[Paste] ❌ 所有 AX API 方法失败，尝试 Unicode 键盘事件")
-        if insertTextViaUnicodeKeyboard(text: text) {
-            return
-        }
-        Log.log("[Paste] Unicode 键盘事件也失败，fallback 到剪贴板方案（带恢复）")
+        // 所有 AX 方法都失败或无法验证，使用系统粘贴作为最终可恢复 fallback。
+        Log.log("[Paste] ❌ AX API 未确认插入成功，fallback 到剪贴板方案（带恢复）")
         fallbackToPasteboard(text: text, withRestore: true)
-    }
-
-    /// 使用 Unicode 键盘事件直接输入文本（通用方法，分段发送）
-    /// 返回 true 表示成功发送，false 表示失败
-    @discardableResult
-    private static func insertTextViaUnicodeKeyboard(text: String) -> Bool {
-        Log.log("[Paste] 开始 Unicode 键盘事件输入，文本长度: \(text.count)")
-
-        let source = CGEventSource(stateID: .combinedSessionState)
-        source?.localEventsSuppressionInterval = 0.0
-
-        let chunkSize = 16 // UTF-16 字符数每段
-
-        // 按换行符分割文本，逐段处理
-        var segments: [(isNewline: Bool, content: String)] = []
-        var current = ""
-        for char in text {
-            if char == "\n" {
-                if !current.isEmpty {
-                    segments.append((isNewline: false, content: current))
-                    current = ""
-                }
-                segments.append((isNewline: true, content: "\n"))
-            } else {
-                current.append(char)
-            }
-        }
-        if !current.isEmpty {
-            segments.append((isNewline: false, content: current))
-        }
-
-        var anyFailed = false
-
-        for segment in segments {
-            if segment.isNewline {
-                // 发送 Return 键事件 (keyCode 0x24)
-                guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: true),
-                      let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x24, keyDown: false) else {
-                    Log.log("[Paste] ❌ 无法创建 Return 键事件")
-                    anyFailed = true
-                    continue
-                }
-                keyDown.post(tap: .cghidEventTap)
-                usleep(5000) // 5ms
-                keyUp.post(tap: .cghidEventTap)
-                usleep(5000) // 5ms
-            } else {
-                // 将文本转为 UTF-16，按 chunkSize 分段发送
-                let utf16Array = Array(segment.content.utf16)
-                var offset = 0
-
-                while offset < utf16Array.count {
-                    let end = min(offset + chunkSize, utf16Array.count)
-                    let chunk = Array(utf16Array[offset..<end])
-
-                    guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-                          let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else {
-                        Log.log("[Paste] ❌ 无法创建 Unicode 键盘事件")
-                        anyFailed = true
-                        break
-                    }
-
-                    chunk.withUnsafeBufferPointer { buffer in
-                        keyDown.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                        keyUp.keyboardSetUnicodeString(stringLength: buffer.count, unicodeString: buffer.baseAddress)
-                    }
-
-                    keyDown.post(tap: .cghidEventTap)
-                    usleep(5000) // 5ms
-                    keyUp.post(tap: .cghidEventTap)
-                    usleep(5000) // 5ms 段间延时
-
-                    offset = end
-                }
-            }
-        }
-
-        if anyFailed {
-            Log.log("[Paste] ⚠️ Unicode 键盘事件部分失败")
-            return false
-        }
-
-        Log.log("[Paste] ✅ Unicode 键盘事件已发送")
-        return true
     }
 
     // MARK: - 剪贴板保存/恢复

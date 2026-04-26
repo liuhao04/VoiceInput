@@ -49,9 +49,9 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 输出：`dist/VoiceInput-<version>.dmg`，用户双击安装。
 
 **Personal/Distribution 隔离机制：**
-- 代码层：`KeychainHelper.swift` 和 `Logger.swift` 都通过 `Bundle.main.bundleIdentifier` 动态选择服务名/路径
+- 代码层：`CredentialsStore.swift` 通过 `CFBundleName` 选择 `Application Support` 凭证路径，`Logger.swift` 通过 bundle 信息选择日志路径
 - 构建层：脚本用 PlistBuddy 修改 Info.plist 副本，不修改源文件
-- 迁移：Personal 版首次启动会从分发版（`com.voiceinput.mac`）一次性拷贝 Keychain 凭证 + UserDefaults 配置，由 `Config.migratePersonalFromDistributionIfNeeded` 实现，标记 key 为 `personalMigratedFromDistribution_v1`
+- 迁移：Personal 版首次启动会从分发版（`com.voiceinput.mac` / `VoiceInput`）一次性拷贝 UserDefaults 配置和缺失的 `credentials.json` 凭证；凭证迁移使用独立标记 `personalCredentialsMigratedFromDistribution_v1`，不会覆盖 Personal 已保存凭证
 - 角标渲染：`AppDelegate.isPersonalBuild` 在 `updateStatusIcon()` 中决定是否绘制紫色角标
 
 **Version Display Requirements:**
@@ -169,14 +169,14 @@ macOS permissions (Microphone, Accessibility, etc.) are tied to the app's **code
 
 3. **NEVER add entitlements that require a Team ID** — For example, `keychain-access-groups` requires a real Apple Developer Team ID. With ad-hoc signing, this causes Error 163 (launchd refuses to spawn the app).
 
-4. **NEVER change the installation path** — Permissions are tied to `~/Applications/VoiceInput.app`. Changing the path means re-requesting all permissions.
+4. **NEVER change the installation path** — Permissions are tied to the installed app path (`~/Applications/VoiceInput Personal.app` for Personal, `/Applications/VoiceInput.app` or the user's dragged location for Distribution). Changing the path means re-requesting all permissions.
 
 5. **NEVER delete the entire app bundle during install** — The build script only replaces the binary and Info.plist inside the existing bundle. Running `rm -rf VoiceInput.app` would destroy the permission association.
 
 **Safe patterns:**
-- Store sensitive credentials in Keychain with `kSecAttrAccessibleWhenUnlocked` + `SecAccessCreate(name, [] as CFArray, &access)` to create unrestricted ACL (avoids binding to cdhash)
+- Store sensitive credentials in `~/Library/Application Support/<CFBundleName>/credentials.json` with file mode `0600`; do not move them back to Keychain
 - Use `app.activate(options:)` for app activation (no TCC permission needed)
-- Keep the `VoiceInput.entitlements` file empty (just `<dict/>`)
+- Keep `VoiceInput.entitlements` limited to required non-profile entitlements such as `com.apple.security.device.audio-input`
 - Only replace files inside the app bundle, never recreate the bundle from scratch
 
 ## Keychain: Don't Use It (Lessons Learned)
