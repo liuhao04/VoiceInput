@@ -254,6 +254,11 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         refreshToLatest()
     }
 
+    func refresh() {
+        guard window != nil else { return }
+        refreshToLatest()
+    }
+
     @objc private func columnResized(_ notification: Notification) {
         NSObject.cancelPreviousPerformRequests(withTarget: self, selector: #selector(refreshRowHeights), object: nil)
         perform(#selector(refreshRowHeights), with: nil, afterDelay: 0.05)

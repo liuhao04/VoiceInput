@@ -49,6 +49,18 @@ enum TriggerActivation: String, Codable, CaseIterable {
     }
 }
 
+enum HistoryStorageLocation: String, Codable, CaseIterable {
+    case iCloud
+    case local
+
+    var displayName: String {
+        switch self {
+        case .iCloud: return "iCloud Drive"
+        case .local: return "仅本地"
+        }
+    }
+}
+
 /// 可配置的触发键（均为修饰键，单独按下并释放时触发）
 enum TriggerKey: String, CaseIterable {
     case fn = "fn"
@@ -117,6 +129,8 @@ enum Config {
     private static let pasteLastHotkeyKey = "pasteLastHotkey"
     private static let customTriggerBindingsKey = "customTriggerBindings"
     private static let triggerActivationKey = "triggerActivation"
+    private static let historyEnabledKey = "historyEnabled"
+    private static let historyStorageLocationKey = "historyStorageLocation"
 
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
@@ -174,6 +188,12 @@ enum Config {
             }
             if let path = oldDefaults.string(forKey: replaceRulesFilePathKey) {
                 UserDefaults.standard.set(path, forKey: replaceRulesFilePathKey)
+            }
+            if oldDefaults.object(forKey: historyEnabledKey) != nil {
+                UserDefaults.standard.set(oldDefaults.bool(forKey: historyEnabledKey), forKey: historyEnabledKey)
+            }
+            if let historyStorageLocation = oldDefaults.string(forKey: historyStorageLocationKey) {
+                UserDefaults.standard.set(historyStorageLocation, forKey: historyStorageLocationKey)
             }
         }
 
@@ -328,5 +348,22 @@ enum Config {
             return v
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: triggerActivationKey) }
+    }
+
+    static var historyEnabled: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: historyEnabledKey) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: historyEnabledKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: historyEnabledKey) }
+    }
+
+    static var historyStorageLocation: HistoryStorageLocation {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: historyStorageLocationKey),
+                  let location = HistoryStorageLocation(rawValue: raw) else { return .iCloud }
+            return location
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: historyStorageLocationKey) }
     }
 }

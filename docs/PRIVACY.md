@@ -11,7 +11,7 @@ VoiceInput 是一个开源的 macOS 菜单栏语音输入工具。本政策说�
 | 数据 | 本地存储 | 上传 | 备注 |
 |---|---|---|---|
 | **麦克风音频** | 不存储 | 仅在录音过程中实时加密流式发送给火山引擎 ASR 服务完成识别 | 录音停止后内存中的音频即被释放；本应用不会将完整录音写入磁盘，也不会将音频发送到除火山引擎之外的任何服务器 |
-| **识别结果文本** | `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` 下的 JSONL 历史文件 | 不上传 | 位于 iCloud Drive 目录，是否同步到 Apple iCloud 由你的 macOS 系统设置决定（不是本应用的行为）。你可以随时删除该目录清空历史 |
+| **识别结果文本** | 默认保存到 `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` 下的 JSONL 历史文件；可在设置中关闭历史记录，或切换到 `~/Library/Application Support/<App Name>/history/` 仅本地保存 | 不上传 | iCloud Drive 目录是否同步到 Apple iCloud 由你的 macOS 系统设置决定（不是本应用的行为）。设置页提供关闭历史、清空历史、打开历史目录和切换仅本地存储 |
 | **凭证**（火山引擎 App ID / Access Token / Resource ID / 热词表 ID） | `~/Library/Application Support/<App Name>/credentials.json`（权限 `0600`，例如 `VoiceInput` 或 `VoiceInput Personal`） | 不上传 | 仅在调用火山引擎 API 时作为身份认证头发送给火山引擎 |
 | **应用设置**（触发键、快捷键、识别模式等） | UserDefaults（`com.voiceinput.mac.plist`） | 不上传 | — |
 | **本地日志** | `~/Library/Logs/VoiceInput.log` | 不上传 | 记录连接状态、错误信息、版本号等调试信息。可从菜单栏 > 打开日志文件查看内容 |
@@ -49,8 +49,9 @@ VoiceInput 是一个开源的 macOS 菜单栏语音输入工具。本政策说�
 - **卸载**：删除 `VoiceInput.app` 即卸载。可同时清理下列目录以移除所有本地数据：
   - `~/Library/Application Support/VoiceInput/` 和/或 `~/Library/Application Support/VoiceInput Personal/`（凭证）
   - `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`（识别历史）
+  - `~/Library/Application Support/VoiceInput/history/` 和/或 `~/Library/Application Support/VoiceInput Personal/history/`（仅本地识别历史）
   - `~/Library/Logs/VoiceInput.log`（日志）
-- **清空识别历史**：手动删除 `history/` 目录中的 JSONL 文件
+- **识别历史控制**：在设置页可以关闭历史记录、清空当前历史目录、打开历史目录，或切换到仅本地存储
 - **撤销系统权限**：在「系统设置 → 隐私与安全性 → 麦克风 / 辅助功能」中解除授权
 
 ## 变更
@@ -70,7 +71,7 @@ VoiceInput 是一个开源的 macOS 菜单栏语音输入工具。本政策说�
 VoiceInput is an open-source macOS menu bar voice-to-text tool. This policy describes how the app handles your data locally and in transit.
 
 - **Microphone audio** is streamed in real time over TLS WebSocket to Volcano Engine's ASR service for transcription. Audio is **not written to disk** by the app. It is released from memory after each recording.
-- **Transcribed text** is stored locally under `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` as JSONL history files. Whether this directory syncs to Apple iCloud is controlled by your macOS system settings, not by this app. You can delete the directory at any time.
+- **Transcribed text** is stored by default under `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/` as JSONL history files. You can disable history, clear history, open the history directory, or switch history storage to local-only under `~/Library/Application Support/<App Name>/history/` in Settings. Whether the iCloud Drive directory syncs to Apple iCloud is controlled by your macOS system settings, not by this app.
 - **Credentials** (Volcano Engine App ID / Access Token / Resource ID / Boosting Table ID) are stored locally at `~/Library/Application Support/<App Name>/credentials.json` (chmod `0600`, for example `VoiceInput` or `VoiceInput Personal`) and only sent to Volcano Engine for API authentication.
 - **Logs** (`~/Library/Logs/VoiceInput.log`) contain connection status, errors, and version info. They are not uploaded.
 - **No analytics, telemetry, or crash reporting** of any kind. The project has no server component controlled by the author.
@@ -86,7 +87,7 @@ Audio data is sent to [Volcano Engine](https://www.volcengine.com/)'s ASR API fo
 
 ### Your control
 
-- Uninstall by removing `VoiceInput.app`. To wipe all local data, also remove `~/Library/Application Support/VoiceInput/` and/or `~/Library/Application Support/VoiceInput Personal/`, `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`, and the matching log file under `~/Library/Logs/`.
+- Uninstall by removing `VoiceInput.app`. To wipe all local data, also remove `~/Library/Application Support/VoiceInput/` and/or `~/Library/Application Support/VoiceInput Personal/`, `~/Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history/`, any local-only history directory under Application Support, and the matching log file under `~/Library/Logs/`.
 - Revoke system permissions at any time from **System Settings → Privacy & Security**.
 
 ### Contact

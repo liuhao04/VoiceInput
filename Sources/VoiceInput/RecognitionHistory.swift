@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 struct HistoryEntry: Codable {
@@ -57,17 +58,41 @@ struct HistoryEntry: Codable {
 enum RecognitionHistory {
     private static let queue = DispatchQueue(label: "com.voiceinput.history")
 
-    private static let historyDir: URL = {
+    private static let iCloudHistoryDir: URL = {
         let home = FileManager.default.homeDirectoryForCurrentUser
         return home.appendingPathComponent("Library/Mobile Documents/com~apple~CloudDocs/VoiceInput/history")
     }()
 
+    private static let localHistoryDir: URL = {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support")
+            .appendingPathComponent(Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String ?? "VoiceInput")
+            .appendingPathComponent("history")
+    }()
+
+    static var historyDir: URL {
+        switch Config.historyStorageLocation {
+        case .iCloud: return iCloudHistoryDir
+        case .local: return localHistoryDir
+        }
+    }
+
+    static var directoryDescription: String {
+        switch Config.historyStorageLocation {
+        case .iCloud: return "iCloud Drive"
+        case .local: return "仅本地"
+        }
+    }
+
     /// 确保目录存在
-    private static func ensureDirectory() {
+    @discardableResult
+    static func ensureDirectory() -> URL {
         let fm = FileManager.default
+        let historyDir = historyDir
         if !fm.fileExists(atPath: historyDir.path) {
             try? fm.createDirectory(at: historyDir, withIntermediateDirectories: true)
         }
+        return historyDir
     }
 
     /// 当月文件名，如 2026-03.jsonl
@@ -83,6 +108,10 @@ enum RecognitionHistory {
     /// 追加一条记录。originalText 为 ASR 原始结果，text 为实际插入的文本（可能经用户编辑）。
     /// 历史目录位于 iCloud Drive，文件系统偶尔会同步阻塞；写入放到后台队列避免卡住菜单栏 UI。
     static func append(text: String, app: String, originalText: String? = nil) {
+        guard Config.historyEnabled else {
+            Log.log("[History] 历史记录已关闭，跳过写入")
+            return
+        }
         let entryTime = Date()
         queue.async {
             appendSync(text: text, app: app, originalText: originalText, time: entryTime)
@@ -113,9 +142,8 @@ enum RecognitionHistory {
         line += "}\n"
 
         let cal = Calendar.current
-        let now = Date()
-        let year = cal.component(.year, from: now)
-        let month = cal.component(.month, from: now)
+        let year = cal.component(.year, from: time)
+        let month = cal.component(.month, from: time)
         let path = filePath(year: year, month: month)
 
         if let handle = try? FileHandle(forWritingTo: path) {
@@ -134,6 +162,7 @@ enum RecognitionHistory {
 
     /// 加载指定月份的记录
     static func load(year: Int, month: Int) -> [HistoryEntry] {
+        guard Config.historyEnabled else { return [] }
         let path = filePath(year: year, month: month)
         guard let data = try? String(contentsOf: path, encoding: .utf8) else {
             return []
@@ -152,6 +181,7 @@ enum RecognitionHistory {
 
     /// 扫描可用的月份，返回 [(year, month)] 按时间倒序
     static func availableMonths() -> [(year: Int, month: Int)] {
+        guard Config.historyEnabled else { return [] }
         ensureDirectory()
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(atPath: historyDir.path) else {
@@ -174,5 +204,33 @@ enum RecognitionHistory {
         // 按时间倒序
         months.sort { ($0.year, $0.month) > ($1.year, $1.month) }
         return months
+    }
+
+    static func openDirectory() {
+        let directory = ensureDirectory()
+        NSWorkspace.shared.open(directory)
+    }
+
+    static func clearCurrentStorage() -> Bool {
+        var success = true
+        queue.sync {
+            let directory = ensureDirectory()
+            guard let files = try? FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: nil) else {
+                success = false
+                return
+            }
+            for file in files where file.pathExtension == "jsonl" {
+                do {
+                    try FileManager.default.removeItem(at: file)
+                } catch {
+                    success = false
+                    Log.log("[History] 删除历史文件失败: \(file.path), error=\(error.localizedDescription)")
+                }
+            }
+        }
+        if success {
+            Log.log("[History] 已清空当前历史目录: \(historyDir.path)")
+        }
+        return success
     }
 }

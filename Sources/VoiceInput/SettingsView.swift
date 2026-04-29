@@ -1,5 +1,96 @@
+import AppKit
 import SwiftUI
 import ServiceManagement
+
+private struct HistorySettingsSection: View {
+    @Binding var historyEnabled: Bool
+    @Binding var historyStorageLocation: HistoryStorageLocation
+    @Binding var historyStatus: String?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("识别历史")
+                .font(.system(size: 13, weight: .bold))
+
+            Toggle("保存识别历史", isOn: $historyEnabled)
+                .toggleStyle(.checkbox)
+                .onChange(of: historyEnabled) { newValue in
+                    Config.historyEnabled = newValue
+                    historyStatus = newValue ? "历史记录已开启" : "历史记录已关闭"
+                    Log.log("[Settings] 历史记录已\(newValue ? "开启" : "关闭")")
+                }
+
+            HStack(spacing: 8) {
+                Text("存储位置:")
+                    .font(.system(size: 12))
+                Picker("", selection: $historyStorageLocation) {
+                    ForEach(HistoryStorageLocation.allCases, id: \.rawValue) { location in
+                        Text(location.displayName).tag(location)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.segmented)
+                .frame(width: 180)
+                .onChange(of: historyStorageLocation) { newValue in
+                    Config.historyStorageLocation = newValue
+                    historyStatus = "历史目录已切换到 \(newValue.displayName)"
+                    Log.log("[Settings] 历史目录已切换到 \(newValue.rawValue)")
+                }
+                Spacer()
+            }
+
+            Text(shortenPath(RecognitionHistory.historyDir.path))
+                .font(.system(size: 11))
+                .foregroundColor(.secondary)
+                .lineLimit(1)
+                .truncationMode(.middle)
+
+            HStack(spacing: 8) {
+                Button("打开历史目录") { openHistoryDirectory() }
+                    .controlSize(.small)
+                Button("清空历史") { confirmClearHistory() }
+                    .controlSize(.small)
+                Spacer()
+                if let status = historyStatus {
+                    Text(status)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                }
+            }
+        }
+        .padding(.leading, 4)
+    }
+
+    private func shortenPath(_ path: String) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        if path.hasPrefix(home) {
+            return "~" + path.dropFirst(home.count)
+        }
+        return path
+    }
+
+    private func openHistoryDirectory() {
+        RecognitionHistory.openDirectory()
+        historyStatus = "已打开历史目录"
+    }
+
+    private func confirmClearHistory() {
+        let alert = NSAlert()
+        alert.messageText = "清空识别历史？"
+        alert.informativeText = "将删除当前存储位置（\(historyStorageLocation.displayName)）中的历史记录文件。此操作不能撤销。"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "清空")
+        alert.addButton(withTitle: "取消")
+
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if RecognitionHistory.clearCurrentStorage() {
+            historyStatus = "历史已清空"
+            HistoryWindow.shared.refresh()
+        } else {
+            historyStatus = "清空失败，请查看日志"
+        }
+    }
+}
 
 /// SwiftUI 设置界面，通过 NSHostingView 嵌入 NSWindow
 struct SettingsView: View {
@@ -11,6 +102,9 @@ struct SettingsView: View {
     @State private var pendingNewCustomBinding: HotkeyBinding? = nil
     @State private var pasteLastBinding: HotkeyBinding? = Config.pasteLastHotkey
     @State private var launchAtLogin: Bool = SMAppService.mainApp.status == .enabled
+    @State private var historyEnabled: Bool = Config.historyEnabled
+    @State private var historyStorageLocation: HistoryStorageLocation = Config.historyStorageLocation
+    @State private var historyStatus: String? = nil
 
     @State private var volcAppId: String = Config.volcAppId
     @State private var volcAccessToken: String = Config.volcAccessToken
@@ -176,6 +270,14 @@ struct SettingsView: View {
                     }
                 }
                 .padding(.leading, 4)
+
+                Divider()
+
+                HistorySettingsSection(
+                    historyEnabled: $historyEnabled,
+                    historyStorageLocation: $historyStorageLocation,
+                    historyStatus: $historyStatus
+                )
 
                 Spacer(minLength: 12)
             }
