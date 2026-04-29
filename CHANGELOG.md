@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.0.2] - 2026-04-29
+
+### Added
+- Added recognition history controls in Settings: enable/disable history, switch between iCloud Drive and local-only storage, open the history folder, and clear the current history store.
+
+### Fixed
+- Fixed an intermittent `The network connection was lost` error when starting recognition after the app had been idle for a while by retrying pre-ready WebSocket failures while preserving buffered audio.
+- Fixed the Python ASR protocol test so it can read the app's local credentials file when environment variables are not set.
+- Added retry handling to the Python WebSocket test client to avoid transient connection failures breaking CI.
+
 ## [1.0.1] - 2026-04-23
 
 ### Added
@@ -52,6 +62,7 @@ _Nothing yet._
 - Microphone permission
 - Accessibility permission
 
-[Unreleased]: https://github.com/liuhao04/VoiceInput/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/liuhao04/VoiceInput/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/liuhao04/VoiceInput/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/liuhao04/VoiceInput/releases/tag/v1.0.1
 [1.0.0]: https://github.com/liuhao04/VoiceInput/releases/tag/v1.0.0-rc1
