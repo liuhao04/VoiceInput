@@ -21,6 +21,7 @@ except ImportError:
     sys.exit(1)
 
 from config import (
+    CREDENTIAL_SOURCE,
     VOLC_APP_ID,
     VOLC_ACCESS_TOKEN,
     VOLC_RESOURCE_ID,
@@ -69,6 +70,27 @@ def send_audio(ws, pcm: bytes, is_last: bool = False):
     header = HEADER_AUDIO_LAST if is_last else HEADER_AUDIO
     msg = header + struct.pack(">I", len(pcm)) + pcm
     ws.send(msg, opcode=websocket.ABNF.OPCODE_BINARY)
+
+
+def connect_websocket(url: str, header_list: list[str], attempts: int = 3):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        ws = websocket.WebSocket()
+        try:
+            ws.connect(url, header=header_list)
+            return ws
+        except (OSError, websocket.WebSocketException) as e:
+            last_err = e
+            try:
+                ws.close()
+            except Exception:
+                pass
+            if attempt >= attempts:
+                break
+            delay = 0.35 * attempt
+            print(f"[连接] 第 {attempt}/{attempts} 次失败: {e}，{delay:.2f}s 后重试", file=sys.stderr)
+            time.sleep(delay)
+    raise last_err
 
 
 def parse_server_response(data: bytes) -> str | None:
@@ -170,6 +192,7 @@ def record_mic(seconds: float) -> bytes:
 
 def run_stream_mic(seconds: float):
     """流式麦克风：边说边发、边说边出识别结果。"""
+    ensure_credentials()
     try:
         import pyaudio
     except ImportError:
@@ -183,8 +206,8 @@ def run_stream_mic(seconds: float):
         f"X-Api-Connect-Id: {connect_id}",
     ]
     print(f"[连接] {ASR_WS_URL}")
-    ws = websocket.WebSocket()
-    ws.connect(ASR_WS_URL, header=header_list)
+    print(f"[凭证] {CREDENTIAL_SOURCE}")
+    ws = connect_websocket(ASR_WS_URL, header_list)
     results = []
     recv_stop = threading.Event()
 
@@ -314,6 +337,7 @@ def fetch_demo_audio():
 
 
 def run_test(audio_pcm: bytes, connect_id: str | None = None):
+    ensure_credentials()
     connect_id = connect_id or str(uuid.uuid4())
     url = ASR_WS_URL
     header_list = [
@@ -324,8 +348,8 @@ def run_test(audio_pcm: bytes, connect_id: str | None = None):
     ]
     print(f"[连接] {url}")
     print(f"[Connect-Id] {connect_id}")
-    ws = websocket.WebSocket()
-    ws.connect(url, header=header_list)
+    print(f"[凭证] {CREDENTIAL_SOURCE}")
+    ws = connect_websocket(url, header_list)
     results = []
     recv_done = threading.Event()
 
@@ -383,6 +407,25 @@ def run_test(audio_pcm: bytes, connect_id: str | None = None):
     finally:
         recv_done.set()
         ws.close()
+
+
+def ensure_credentials():
+    missing = []
+    if not VOLC_APP_ID:
+        missing.append("VOLC_APP_ID")
+    if not VOLC_ACCESS_TOKEN:
+        missing.append("VOLC_ACCESS_TOKEN")
+    if not missing:
+        return
+
+    print(
+        "缺少火山引擎凭证: "
+        + ", ".join(missing)
+        + "\n请设置环境变量，或在 VoiceInput 设置中保存凭证，"
+        + "或设置 VOICEINPUT_CREDENTIALS_FILE 指向 credentials.json。",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 
 
 def main():

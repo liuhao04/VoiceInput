@@ -16,7 +16,14 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
     /// 仅在收到服务端首包成功响应后才发送音频（与 Python 测试脚本一致）
     private var isConnectionReady = false
     private var hasReceivedFirstResponse = false
+    private var hasDeliveredTerminalError = false
+    private var preReadyRetryCount = 0
     private var pcmQueue: [(data: Data, isLast: Bool)] = []
+
+    /// 长时间空闲后的第一次握手偶尔会在收到首包前被网络层/服务端关闭。
+    /// 这类错误通常立刻重连即可恢复；已经采集到的 PCM 保留在队列中，首包成功后再发。
+    private let maxPreReadyRetries = 2
+    private let preReadyRetryBaseDelay: TimeInterval = 0.35
     
     // 协议常量 (大端)，与测试脚本一致；服务端要求首包 gzip
     private let headerFullClientRequest: [UInt8] = [0x11, 0x10, 0x01, 0x01]  // JSON, Gzip
@@ -32,8 +39,12 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         self.onText = onText
         self.onError = onError
         self.onReady = onReady
-        isRunning = true
-        connect()
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.resetRunStateForStart()
+            self.isRunning = true
+            self.connect()
+        }
     }
     
     /// 发送负包（最后一包），但保持连接以接收二遍识别结果
@@ -49,11 +60,13 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         _asrLog("close: 关闭 WebSocket 连接")
         isRunning = false
         onError = nil  // 防止关闭时的 socket 错误触发 UI 报错
-        webSocketTask?.cancel(with: .goingAway, reason: nil)
-        webSocketTask = nil
-        // URLSession 强引用 delegate（即 self），不 invalidate 则每次录音泄漏一个 VolcanoASR + 连接
-        urlSession?.invalidateAndCancel()
-        urlSession = nil
+        queue.async { [weak self] in
+            guard let self = self else { return }
+            self.tearDownTransport()
+            self.isConnectionReady = false
+            self.hasReceivedFirstResponse = false
+            self.pcmQueue.removeAll()
+        }
     }
 
     /// 便捷方法：发送负包后 0.3s 自动关闭连接（用于测试等快速关闭场景）。
@@ -62,10 +75,16 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         _asrLog("stop")
         isRunning = false
         queue.async { [weak self] in
-            self?._sendAudio(Data(), isLast: true)
+            guard let self = self else { return }
+            self._sendAudio(Data(), isLast: true)
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-                self?.webSocketTask?.cancel(with: .goingAway, reason: nil)
-                self?.webSocketTask = nil
+                self.queue.async { [weak self] in
+                    guard let self = self else { return }
+                    self.tearDownTransport()
+                    self.isConnectionReady = false
+                    self.hasReceivedFirstResponse = false
+                    self.pcmQueue.removeAll()
+                }
             }
         }
     }
@@ -94,6 +113,23 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         urlSession = session
         webSocketTask = session.webSocketTask(with: req)
         webSocketTask?.resume()
+    }
+
+    private func resetRunStateForStart() {
+        tearDownTransport()
+        isConnectionReady = false
+        hasReceivedFirstResponse = false
+        hasDeliveredTerminalError = false
+        preReadyRetryCount = 0
+        pcmQueue.removeAll()
+    }
+
+    private func tearDownTransport() {
+        webSocketTask?.cancel(with: .goingAway, reason: nil)
+        webSocketTask = nil
+        // URLSession 强引用 delegate（即 self），不 invalidate 则每次录音泄漏一个 VolcanoASR + 连接
+        urlSession?.invalidateAndCancel()
+        urlSession = nil
     }
     
     private func sendFullClientRequest() {
@@ -159,18 +195,21 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
             guard let self = self else { return }
             if let e = err {
                 _asrLog("发送 full client request 失败: \(e.localizedDescription)")
-                self.onError?(e)
+                self.queue.async {
+                    guard task === self.webSocketTask else { return }
+                    self.handleTransportError(e, source: "发送 full client request")
+                }
                 return
             }
         }
     }
     
     private func _sendAudio(_ data: Data, isLast: Bool) {
-        guard let task = webSocketTask else { return }
         if !isConnectionReady {
             pcmQueue.append((data: data, isLast: isLast))
             return
         }
+        guard let task = webSocketTask else { return }
         _doSendAudio(task: task, data: data, isLast: isLast)
     }
     
@@ -183,7 +222,10 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         task.send(.data(msg)) { [weak self] err in
             if let e = err {
                 _asrLog("发送音频失败: \(e.localizedDescription)")
-                self?.onError?(e)
+                self?.queue.async { [weak self] in
+                    guard let self = self, self.isCurrentTask(task) else { return }
+                    self.handleTransportError(e, source: "发送音频")
+                }
             }
         }
     }
@@ -204,7 +246,10 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
                     let message = try await task.receive()
                     switch message {
                     case .data(let data):
-                        self.parseServerResponse(data)
+                        self.queue.async { [weak self] in
+                            guard let self = self, task === self.webSocketTask else { return }
+                            self.parseServerResponse(data)
+                        }
                     case .string:
                         break
                     @unknown default:
@@ -212,10 +257,52 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
                     }
                 }
             } catch {
-                guard let self = self, self.isRunning else { return }
-                self.onError?(error)
+                guard let self = self else { return }
+                self.queue.async {
+                    guard self.isRunning, task === self.webSocketTask else { return }
+                    self.handleTransportError(error, source: "receive")
+                }
             }
         }
+    }
+
+    private func handleTransportError(_ error: Error, source: String) {
+        guard isRunning else { return }
+
+        if shouldRetryBeforeReady(error) {
+            preReadyRetryCount += 1
+            let delay = preReadyRetryBaseDelay * Double(preReadyRetryCount)
+            _asrLog("\(source): 连接尚未 ready 时断开，\(String(format: "%.2f", delay))s 后重试 \(preReadyRetryCount)/\(maxPreReadyRetries): \(error.localizedDescription)")
+            tearDownTransport()
+            isConnectionReady = false
+            hasReceivedFirstResponse = false
+            queue.asyncAfter(deadline: .now() + delay) { [weak self] in
+                guard let self = self, self.isRunning else { return }
+                self.connect()
+            }
+            return
+        }
+
+        guard !hasDeliveredTerminalError else { return }
+        hasDeliveredTerminalError = true
+        onError?(error)
+    }
+
+    private func shouldRetryBeforeReady(_ error: Error) -> Bool {
+        guard !isConnectionReady, !hasReceivedFirstResponse, preReadyRetryCount < maxPreReadyRetries else {
+            return false
+        }
+        let nsError = error as NSError
+        guard nsError.domain == NSURLErrorDomain else { return false }
+        return nsError.code == NSURLErrorNetworkConnectionLost
+            || nsError.code == NSURLErrorTimedOut
+            || nsError.code == NSURLErrorCannotConnectToHost
+            || nsError.code == NSURLErrorCannotFindHost
+    }
+
+    private func isCurrentTask(_ task: URLSessionTask) -> Bool {
+        guard let current = webSocketTask else { return false }
+        return task === current
     }
     
     private func parseServerResponse(_ data: Data) {
@@ -245,11 +332,8 @@ final class VolcanoASR: NSObject, @unchecked Sendable {
         if messageType != 0x09 { return }
         if !hasReceivedFirstResponse {
             hasReceivedFirstResponse = true
-            queue.async { [weak self] in
-                guard let self = self else { return }
-                self.isConnectionReady = true
-                self._flushPcmQueue()
-            }
+            isConnectionReady = true
+            _flushPcmQueue()
             DispatchQueue.main.async { self.onReady?() }
         }
         var offset = 4
@@ -294,8 +378,9 @@ extension VolcanoASR: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol protocol: String?) {
         // 延迟一帧再发首包，确保 socket 已可写（避免 "Socket is not connected"）
         queue.asyncAfter(deadline: .now() + 0.05) { [weak self] in
-            self?.sendFullClientRequest()
-            self?.receiveLoop()
+            guard let self = self, self.isRunning, self.isCurrentTask(webSocketTask) else { return }
+            self.sendFullClientRequest()
+            self.receiveLoop()
         }
     }
     
@@ -304,7 +389,10 @@ extension VolcanoASR: URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         if let e = error {
             _asrLog("URLSession 错误: \(e.localizedDescription)")
-            if isRunning { onError?(e) }
+            queue.async { [weak self] in
+                guard let self = self, self.isCurrentTask(task) else { return }
+                self.handleTransportError(e, source: "URLSession")
+            }
         }
     }
 }

@@ -13,13 +13,20 @@
 
 ## 配置
 
-与 Mac App 一致，可在 `config.py` 中修改或通过环境变量覆盖：
+与 Mac App 一致，环境变量优先：
 
 - `VOLC_APP_ID`
 - `VOLC_ACCESS_TOKEN`
 - `VOLC_RESOURCE_ID`
 - `ASR_WS_URL`（默认 `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`，
   测试流式输入模式可改为 `.../api/v3/sauc/bigmodel_nostream`）
+
+如果未设置 `VOLC_APP_ID` / `VOLC_ACCESS_TOKEN`，测试会读取本机私有凭证文件：
+
+- `~/Library/Application Support/VoiceInput Personal/credentials.json`
+- `~/Library/Application Support/VoiceInput/credentials.json`
+
+也可以用 `VOICEINPUT_CREDENTIALS_FILE` 指向指定的 `credentials.json`。
 
 ## 使用方式
 
