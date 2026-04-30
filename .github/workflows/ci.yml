@@ -8,15 +8,13 @@ on:
 
 jobs:
   test:
-    runs-on: macos-13
+    runs-on: macos-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
-    - name: Setup Swift
-      uses: swift-actions/setup-swift@v1
-      with:
-        swift-version: '5.9'
+    - name: Print toolchain
+      run: swift --version && xcodebuild -version
 
     - name: Build
       run: swift build -c release
