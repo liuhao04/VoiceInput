@@ -26,7 +26,7 @@ jobs:
         VOLC_BOOSTING_TABLE_ID: ${{ secrets.VOLC_BOOSTING_TABLE_ID }}
       run: |
         if [ -n "${VOLC_APP_ID:-}" ] && [ -n "${VOLC_ACCESS_TOKEN:-}" ]; then
-          ./scripts/ci-test.sh
+          ./scripts/ci-test.sh --asr-only
         else
           echo "::warning::VOLC_APP_ID/VOLC_ACCESS_TOKEN secrets are not configured. Skipping live ASR protocol test."
         fi
