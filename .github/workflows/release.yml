@@ -13,7 +13,7 @@ jobs:
     runs-on: macos-latest
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v6
 
     - name: Print toolchain
       run: swift --version && xcodebuild -version
@@ -160,7 +160,7 @@ jobs:
         rm -f $RUNNER_TEMP/certificate.p12 || true
 
     - name: Create Release
-      uses: softprops/action-gh-release@v1
+      uses: softprops/action-gh-release@v3
       with:
         files: VoiceInput.dmg
         body: |
