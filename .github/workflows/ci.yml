@@ -19,12 +19,16 @@ jobs:
     - name: Build
       run: swift build -c release
 
-    - name: Run Tests
+    - name: Run Live ASR Protocol Test
+      env:
+        VOLC_APP_ID: ${{ secrets.VOLC_APP_ID }}
+        VOLC_ACCESS_TOKEN: ${{ secrets.VOLC_ACCESS_TOKEN }}
+        VOLC_BOOSTING_TABLE_ID: ${{ secrets.VOLC_BOOSTING_TABLE_ID }}
       run: |
-        if [ -f ./scripts/ci-test.sh ]; then
+        if [ -n "${VOLC_APP_ID:-}" ] && [ -n "${VOLC_ACCESS_TOKEN:-}" ]; then
           ./scripts/ci-test.sh
         else
-          swift test
+          echo "::warning::VOLC_APP_ID/VOLC_ACCESS_TOKEN secrets are not configured. Skipping live ASR protocol test."
         fi
 
     - name: Check Code Style
