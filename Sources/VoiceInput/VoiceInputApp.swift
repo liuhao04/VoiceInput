@@ -51,6 +51,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     var lastFrontmostApp: NSRunningApplication?
     var frontmostCaptureTimer: DispatchSourceTimer?
     var inputPanel: VoiceInputPanel?
+    /// 录音期间监听前台 App 切换，把面板可见性绑定到目标 App
+    private var appActivationObserver: NSObjectProtocol?
     /// 测试模式专用：保存固定的目标应用（避免被 menuWillOpen 等自动更新）
     var testTargetApp: NSRunningApplication?
     /// 编辑模式专用：进入编辑模式时保存的目标应用（防止编辑过程中被定时器更新）
@@ -187,6 +189,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         timer.schedule(deadline: .now() + 0.2, repeating: 0.5)
         timer.setEventHandler { [weak self] in
             guard let self = self else { return }
+            // 录音中锁定目标 App，不被新前台应用顶替；否则切走时
+            // 面板/粘贴目标都会跟随，破坏"绑定到目标 App"的约定
+            if self.isRecording { return }
             let front = NSWorkspace.shared.frontmostApplication
             if front?.bundleIdentifier != Bundle.main.bundleIdentifier {
                 self.lastFrontmostApp = front
@@ -194,6 +199,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         timer.resume()
         frontmostCaptureTimer = timer
+    }
+
+    /// 录音中绑定面板到目标 App：用户切到别的 App 时隐藏面板，切回时再显示
+    private func startPanelBindingObserver() {
+        if appActivationObserver != nil { return }
+        let center = NSWorkspace.shared.notificationCenter
+        appActivationObserver = center.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let self = self, let panel = self.inputPanel else { return }
+            // 编辑模式下 VoiceInput 自身被激活，是预期行为，不动面板
+            if panel.isEditing { return }
+            guard let active = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+            let ownBundle = Bundle.main.bundleIdentifier
+            if active.bundleIdentifier == ownBundle { return }
+            let target = self.lastFrontmostApp
+            if active.processIdentifier == target?.processIdentifier {
+                panel.panel.orderFrontRegardless()
+            } else {
+                panel.panel.orderOut(nil)
+            }
+        }
+    }
+
+    private func stopPanelBindingObserver() {
+        if let token = appActivationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(token)
+            appActivationObserver = nil
+        }
     }
 
     // MARK: - 全局快捷键实现
@@ -875,6 +911,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         let point = cursorOrMouseScreenPoint()
         inputPanel?.show(near: point)
+        startPanelBindingObserver()
         asr = VolcanoASR()
         asr?.start(
             onText: { text, isFinal in
@@ -929,6 +966,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         finalResultTimer = nil
         isRecording = false
         updateStatusIcon()
+        stopPanelBindingObserver()
 
         audioCapture?.stop()
         audioCapture = nil
@@ -954,6 +992,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         Log.log("stopRecording 开始, accumulatedText 长度=\(accumulatedText.count)")
         isRecording = false
         updateStatusIcon()
+        stopPanelBindingObserver()
+        // 用户切走时面板被 orderOut，二遍识别等待期需要恢复显示等待动画
+        if accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false,
+           inputPanel?.panel.isVisible == false {
+            inputPanel?.panel.orderFrontRegardless()
+        }
 
         // 取消录音中空闲检测 timer
         streamingIdleTimer?.cancel()
@@ -1326,6 +1370,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // 重新开始录音
         isRecording = true
         updateStatusIcon()
+        startPanelBindingObserver()
 
         asr = VolcanoASR()
         asr?.start(
