@@ -1009,14 +1009,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         audioCapture?.stop()
         audioCapture = nil
 
-        // 如果没有识别到任何文字，直接关闭面板，不需要等待二遍识别
-        if accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+        // 是否有可注入文本以面板内容为准（涵盖"继续识别"前已编辑的文本）
+        let panelHasText = !(inputPanel?.getCurrentText().trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ?? true)
+        let asrHasText = !accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+
+        // 如果本次新 ASR 没有识别到文字 且 面板里也没有遗留内容，直接关闭
+        if !asrHasText && !panelHasText {
             Log.log("stopRecording: 无识别文字，直接关闭")
             asr?.close()
             asr = nil
             orderOutAuxWindowsIfFrontmost()
             inputPanel?.hide()
             inputPanel = nil
+            return
+        }
+
+        // 本次 ASR 没有新内容（继续识别后立即停止），无需等二遍识别，直接用面板已有文本注入
+        if !asrHasText {
+            Log.log("stopRecording: 本次 ASR 无新内容，直接用面板文本插入")
+            asr?.close()
+            asr = nil
+            closePanelAndInsertText()
             return
         }
 
@@ -1090,7 +1103,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     }
 
     func closePanelAndInsertText() {
-        let text = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
+        // 以面板 textView 为准：走过"继续识别"流程时，面板里是 旧编辑文本 + 新 ASR 的合并结果，
+        // 而 accumulatedText 只反映新 ASR session 的内容，会丢失继续识别前的部分。
+        // 面板不存在时兜底 accumulatedText（异常路径）。
+        let rawText: String
+        if let panelText = inputPanel?.getCurrentText(), !panelText.isEmpty {
+            rawText = panelText
+        } else {
+            rawText = accumulatedText
+        }
+        let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         // 隐藏面板
         orderOutAuxWindowsIfFrontmost()
