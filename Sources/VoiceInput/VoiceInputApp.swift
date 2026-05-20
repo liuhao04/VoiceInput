@@ -66,6 +66,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     private var pendingTrigger: ActiveTrigger?
     /// 记录在触发键按下期间是否曾经有过其他修饰键同时存在（用于过滤 Karabiner 等工具的合成事件）
     private var hadOtherModsDuringPending = false
+    /// 触发键按下瞬间已经存在的 HID-only 普通键状态。只忽略这批旧状态，避免放过触发期间新出现的组合键。
+    private var pendingStaleHIDOnlyKeys: Set<CGKeyCode> = []
 
     // otherModsFirstSeen 已移除：不再容忍瞬态干扰，只要出现过其他修饰键就阻止触发
     /// 触发键按下的时间戳，用于过滤过短的合成事件
@@ -376,11 +378,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     if !isDoubleTapMode && lastReleasedTrigger == trigger && timeSinceLastRelease < 0.5 {
                         pendingTrigger = nil
                         hadOtherModsDuringPending = false
+                        pendingStaleHIDOnlyKeys = []
                     } else {
                         pendingTrigger = trigger
                         pendingTriggerTime = now
                         otherKeyPressed = false
                         hadOtherModsDuringPending = false
+                        pendingStaleHIDOnlyKeys = currentStaleHIDOnlyNonModifierKeys()
+                        if !pendingStaleHIDOnlyKeys.isEmpty {
+                            Log.log("[Hotkey] 记录触发前 stale HID-only 按键: \(pendingStaleHIDOnlyKeys.sorted())")
+                        }
                         // 双击匹配：若本次按下的键恰好是上次"第 1 次释放"记录的键且在窗口内，标记 pending
                         if isDoubleTapMode,
                            lastSingleTapTrigger == trigger,
@@ -394,6 +401,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     // 有其他修饰键同时按下，不触发
                     pendingTrigger = nil
                     hadOtherModsDuringPending = false
+                    pendingStaleHIDOnlyKeys = []
                 }
             } else if !isDown && wasDown {
                 // 修饰键刚释放：检查是否满足"单独按下并释放"条件
@@ -402,7 +410,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                     let remainingMods = currentDeviceFlags & ~keyFlag
                     if remainingMods == 0 {
                         let holdDuration = now - pendingTriggerTime
-                        if holdDuration < 0.03 || otherKeyPressed || isAnyNonModifierKeyPressed() {
+                        let staleHIDOnlyKeys = pendingStaleHIDOnlyKeys
+                        if holdDuration < 0.03 || otherKeyPressed || isAnyNonModifierKeyPressed(since: holdDuration, staleHIDOnlyKeys: staleHIDOnlyKeys) {
                             // 太短/组合键/HID检测到其他键，跳过
                         } else {
                             let hidKeyDown = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
@@ -421,12 +430,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                                     let triggerKeyName = trigger.displayName
                                     let isRec = isRecording
                                     let pendingStart = pendingTriggerTime
+                                    let staleHIDOnlyKeys = pendingStaleHIDOnlyKeys
                                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.2) { [weak self] in
                                         guard let self = self else { return }
-                                        if self.otherKeyPressed || self.isAnyNonModifierKeyPressed() {
+                                        let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
+                                        if self.otherKeyPressed || self.isAnyNonModifierKeyPressed(since: totalElapsed, staleHIDOnlyKeys: staleHIDOnlyKeys) {
                                             return
                                         }
-                                        let totalElapsed = CFAbsoluteTimeGetCurrent() - pendingStart
                                         let dHidKD = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
                                         let dHidKU = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
                                         let dCsKD = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .keyDown)
@@ -451,26 +461,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 lastReleasedTrigger = trigger
                 pendingTrigger = nil
                 hadOtherModsDuringPending = false
+                pendingStaleHIDOnlyKeys = []
             }
         }
 
         activeModifiers = currentDeviceFlags
     }
 
-    /// 检查当前是否有任何非修饰键被物理按下
-    /// 通过 CGEventSourceKeyState 查询 HID 系统状态表，即使 BTT 等工具消费了 CGEvent，
-    /// 物理按键状态仍然会在 HID 状态表中体现。
+    /// 检查当前是否有任何非修饰键被物理按下。
+    /// HID 状态能看到被 BTT/Karabiner 等工具消费的按键，但有时 VirtualHID 会留下
+    /// stale 的 HID-only 按下状态。只忽略触发键按下前已经存在的 stale baseline；
+    /// 触发期间新出现的 HID-only 状态仍按组合键处理。
     /// 修饰键的 keyCode: 54/55=Cmd, 56/60=Shift, 58/61=Option, 59/62=Control, 57=CapsLock, 63=Fn
-    private func isAnyNonModifierKeyPressed() -> Bool {
+    private func isAnyNonModifierKeyPressed(since elapsed: CFTimeInterval, staleHIDOnlyKeys: Set<CGKeyCode>) -> Bool {
         let modifierKeyCodes: Set<CGKeyCode> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
         for keyCode: CGKeyCode in 0...126 {
             if modifierKeyCodes.contains(keyCode) { continue }
-            if CGEventSource.keyState(.hidSystemState, key: keyCode) {
-                Log.log("[Hotkey] HID 状态表: keyCode=\(keyCode) 当前按下")
+            guard CGEventSource.keyState(.hidSystemState, key: keyCode) else { continue }
+
+            if CGEventSource.keyState(.combinedSessionState, key: keyCode) {
+                Log.log("[Hotkey] HID+Session 状态表: keyCode=\(keyCode) 当前按下")
+                return true
+            }
+
+            let hidKeyDown = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+            let hidKeyUp = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyUp)
+            if hidKeyDown < elapsed || hidKeyUp < elapsed {
+                Log.log("[Hotkey] HID 状态表: keyCode=\(keyCode) 当前按下（近期键盘事件，按组合键处理）")
+                return true
+            }
+
+            if staleHIDOnlyKeys.contains(keyCode) {
+                Log.log("[Hotkey] 忽略触发前 stale HID-only 按键状态: keyCode=\(keyCode)")
+            } else {
+                Log.log("[Hotkey] HID-only 状态表: keyCode=\(keyCode) 当前按下（非触发前 baseline，按组合键处理）")
                 return true
             }
         }
         return false
+    }
+
+    private func currentStaleHIDOnlyNonModifierKeys() -> Set<CGKeyCode> {
+        let modifierKeyCodes: Set<CGKeyCode> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        var result = Set<CGKeyCode>()
+        for keyCode: CGKeyCode in 0...126 {
+            if modifierKeyCodes.contains(keyCode) { continue }
+            if CGEventSource.keyState(.hidSystemState, key: keyCode),
+               !CGEventSource.keyState(.combinedSessionState, key: keyCode) {
+                result.insert(keyCode)
+            }
+        }
+        return result
     }
 
     /// LSUIElement 应用没有主菜单栏，需要手动创建 Edit 菜单以支持 Cmd+C/V/X/A 等标准快捷键
