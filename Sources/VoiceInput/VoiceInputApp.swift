@@ -60,6 +60,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     // MARK: - 全局快捷键
     private var hotkeyTap: CFMachPort?
+    /// 辅助功能权限未授予时轮询权限状态，授予后自动重建 event tap（无需重启 App）
+    private var permissionPollTimer: Timer?
     /// 记录上次 flagsChanged 时按下的修饰键集合，用于判断"单独按下并释放"
     private var activeModifiers: UInt64 = 0
     /// 当修饰键按下后如果有其他普通键按下，则标记为组合操作，释放时不触发
@@ -125,7 +127,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         Log.log("全局快捷键已设置，触发键: \(Config.triggerKeys.map { $0.displayName })")
         registerPasteLastHotkey()
         registerCustomTriggerHotkeys()
-        checkAccessibilityPermission()
+        // 权限提示由 setupGlobalHotkey 在 tap 创建失败时触发（避免重复弹窗）
         // 麦克风权限不在启动时预请求：LSUIElement（菜单栏常驻）应用从后台调用
         // AVCaptureDevice.requestAccess，TCC 守护进程会静默吞掉对话框，
         // 导致权限既未被授予也未被拒绝，用户看不到任何提示。
@@ -174,10 +176,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         if isRecording {
             stopRecording()
         }
-        if let m = globalSystemDefinedMonitor {
-            NSEvent.removeMonitor(m)
-            globalSystemDefinedMonitor = nil
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
+        for m in [globalKeyMonitor, globalMouseMonitor, globalSystemDefinedMonitor] {
+            if let m = m { NSEvent.removeMonitor(m) }
         }
+        globalKeyMonitor = nil
+        globalMouseMonitor = nil
+        globalSystemDefinedMonitor = nil
         GlobalHotkeyManager.shared.unregisterAll()
     }
 
@@ -235,6 +241,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     // MARK: - 全局快捷键实现
 
     private func setupGlobalHotkey() {
+        // 幂等：tap 已存在则跳过（权限授予后的自动重建会复用此函数）
+        guard hotkeyTap == nil else { return }
+
         // 使用 CGEvent tap 监听 flagsChanged（修饰键变化）和 keyDown/keyUp（普通键按下/释放）
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
 
@@ -288,35 +297,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             return Unmanaged.passRetained(event)
         }
 
-        // 使用 .cghidEventTap 在 HID 系统层级监听，先于 BTT 等工具的 session-level event tap
-        // 这样即使 BTT 消费了 keyDown 事件，我们在 HID 层已经看到了
-        guard let tap = CGEvent.tapCreate(
+        // 使用 .cghidEventTap 在 HID 系统层级监听，先于 BTT 等工具的 session-level tap；
+        // 失败时降级到 session 级别。两种 tap 都需要辅助功能权限。
+        let createdTap: CFMachPort?
+        if let hidTap = CGEvent.tapCreate(
             tap: .cghidEventTap,
             place: .headInsertEventTap,
             options: .listenOnly,
             eventsOfInterest: eventMask,
             callback: callback,
             userInfo: Unmanaged.passUnretained(self).toOpaque()
-        ) else {
-            Log.log("[Hotkey] ❌ 无法创建 HID event tap，尝试 session 级别...")
-            // 降级到 session 级别
-            guard let sessionTap = CGEvent.tapCreate(
-                tap: .cgSessionEventTap,
-                place: .headInsertEventTap,
-                options: .listenOnly,
-                eventsOfInterest: eventMask,
-                callback: callback,
-                userInfo: Unmanaged.passUnretained(self).toOpaque()
-            ) else {
-                Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
-                checkAccessibilityPermission()
-                return
-            }
-            hotkeyTap = sessionTap
-            let runLoopSource = CFMachPortCreateRunLoopSource(nil, sessionTap, 0)
-            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-            CGEvent.tapEnable(tap: sessionTap, enable: true)
-            Log.log("[Hotkey] ✅ Session-level Event tap 已创建（降级模式）")
+        ) {
+            createdTap = hidTap
+            Log.log("[Hotkey] ✅ HID-level Event tap 已创建（先于 BTT 等工具）")
+        } else if let sessionTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: eventMask,
+            callback: callback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ) {
+            createdTap = sessionTap
+            Log.log("[Hotkey] ⚠️ HID tap 失败，已降级到 Session-level Event tap")
+        } else {
+            createdTap = nil
+        }
+
+        guard let tap = createdTap else {
+            // 权限未授予：tap 创建失败，单键触发因此失效（Carbon 组合键不受影响）
+            Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
+            checkAccessibilityPermission()
+            startPermissionPollingForHotkey()
             return
         }
 
@@ -324,33 +336,50 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        Log.log("[Hotkey] ✅ HID-level Event tap 已创建（先于 BTT 等工具）")
 
-        // 额外添加 NSEvent 全局监听器（Cocoa 层级）
-        // BTT 等工具通过 active CGEvent tap 消费 keyDown 事件后，
-        // listenOnly CGEvent tap 看不到这些事件，但 NSEvent 全局监听器可能仍能收到。
-        // 这是第二道防线。
-        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] event in
+        // 权限已就绪，停止可能在运行的权限轮询
+        permissionPollTimer?.invalidate()
+        permissionPollTimer = nil
+
+        // NSEvent 全局监听器（HID 与 session 降级两条路径都必须安装，作为第二道防线）
+        installGlobalEventMonitors()
+    }
+
+    /// 安装 NSEvent 全局监听器（Cocoa 层级），作为 CGEvent tap 之外的第二道防线。
+    /// BTT 等工具消费 keyDown 后 listenOnly tap 看不到，但 NSEvent 仍可能收到；
+    /// systemDefined 捕获 F1/F2/F10 等不走 keyDown 的系统键，避免 fn+F1 被当成单独按 fn。
+    /// 幂等：已安装则跳过，避免权限重建时重复注册导致回调重复触发。
+    private func installGlobalEventMonitors() {
+        guard globalKeyMonitor == nil else { return }
+
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp]) { [weak self] _ in
             guard let self = self, self.pendingTrigger != nil else { return }
             self.otherKeyPressed = true
         }
-
-        // NSEvent 鼠标监听器：防止 Option+鼠标点击（如终端中移动光标）误触发
-        // 使用 NSEvent 全局监听器而非 CGEvent tap，不会干扰鼠标事件的正常传递
-        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+        // 鼠标监听：防止 Option+鼠标点击（如终端中移动光标）误触发
+        globalMouseMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
             guard let self = self, self.pendingTrigger != nil else { return }
             self.otherKeyPressed = true
         }
-
-        // NSEvent systemDefined 监听器：F1/F2/F10 等系统键（亮度/音量/媒体/键盘背光）
-        // 按下时 OS 发 NSSystemDefined 事件，CGEvent tap 的 keyDown/keyUp 看不到。
-        // pending 期间检测到这类按键 → 标记 otherKeyPressed，阻止误触发（如 fn+F1）。
         globalSystemDefinedMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.systemDefined]) { [weak self] event in
             guard let self = self, self.pendingTrigger != nil else { return }
             // subtype 8 = Aux Keys（亮度、音量、媒体、键盘背光等），其他 subtype 忽略
             if event.subtype.rawValue == 8 {
                 self.otherKeyPressed = true
             }
+        }
+    }
+
+    /// 辅助功能权限未授予时 event tap 无法创建（单键触发因此失效，Carbon 组合键不受影响）。
+    /// 轮询权限状态，一旦用户授予就自动重建 tap，无需重启 App。setupGlobalHotkey 成功后会停止该计时器。
+    private func startPermissionPollingForHotkey() {
+        guard permissionPollTimer == nil else { return }
+        Log.log("[Hotkey] 等待辅助功能权限授予，授予后将自动重建 event tap")
+        permissionPollTimer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            guard AXIsProcessTrusted() else { return }
+            Log.log("[Hotkey] 检测到辅助功能权限已授予，重建 event tap")
+            self.setupGlobalHotkey()
         }
     }
 
@@ -801,7 +830,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 alert.messageText = "需要辅助功能权限"
-                alert.informativeText = "VoiceInput 需要辅助功能权限来监听全局快捷键和插入文字。\n请在系统设置中授予权限后重启应用。"
+                alert.informativeText = "VoiceInput 需要辅助功能权限来监听全局快捷键和插入文字。\n请在系统设置中授予权限，授予后会自动生效，无需重启。"
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "打开系统设置")
                 alert.addButton(withTitle: "稍后")
