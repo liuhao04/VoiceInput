@@ -248,12 +248,14 @@ enum PasteboardPaste {
     }
 
     /// 保存当前剪贴板内容（按 item 结构保存）
-    private static func savePasteboard() -> SavedPasteboardData? {
+    /// 注意：剪贴板原本为空时返回 items 为空的占位，而非 nil——这样粘贴完成后
+    /// 仍会触发 restorePasteboard 把剪贴板清空，避免识别文本永久残留。
+    private static func savePasteboard() -> SavedPasteboardData {
         let pb = NSPasteboard.general
         let changeCount = pb.changeCount
         guard let items = pb.pasteboardItems, !items.isEmpty else {
-            Log.log("[Paste] 剪贴板为空，无需保存")
-            return nil
+            Log.log("[Paste] 剪贴板为空，记录空状态（粘贴后将清空）")
+            return SavedPasteboardData(items: [], changeCount: changeCount)
         }
 
         var savedItems: [[(type: NSPasteboard.PasteboardType, data: Data)]] = []
@@ -270,13 +272,19 @@ enum PasteboardPaste {
         }
 
         Log.log("[Paste] 保存剪贴板内容: \(savedItems.count) 个 item, changeCount=\(changeCount)")
-        return savedItems.isEmpty ? nil : SavedPasteboardData(items: savedItems, changeCount: changeCount)
+        return SavedPasteboardData(items: savedItems, changeCount: changeCount)
     }
 
     /// 恢复剪贴板内容（按 item 结构恢复，保留多 item）
+    /// items 为空时表示原本就是空剪贴板，清空即可（移除粘贴时写入的识别文本）。
     private static func restorePasteboard(_ saved: SavedPasteboardData) {
         let pb = NSPasteboard.general
         pb.clearContents()
+
+        if saved.items.isEmpty {
+            Log.log("[Paste] 剪贴板原为空，已清空（移除识别文本）")
+            return
+        }
 
         var pasteboardItems: [NSPasteboardItem] = []
         for itemData in saved.items {
