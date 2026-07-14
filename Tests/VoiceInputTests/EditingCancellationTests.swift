@@ -4,6 +4,25 @@ import XCTest
 
 final class EditingCancellationTests: XCTestCase {
     @MainActor
+    func testRecordingCancelMakesPanelTextTheLatestRecognitionResult() {
+        _ = NSApplication.shared
+
+        let delegate = AppDelegate()
+        delegate.lastRecognitionResult = "上一次识别结果"
+        delegate.accumulatedText = "仅包含本轮新增识别"
+
+        let panel = VoiceInputPanel()
+        panel.setTextForTesting("  继续识别前后的完整结果\n")
+        delegate.inputPanel = panel
+
+        delegate.cancelRecording()
+
+        XCTAssertEqual(delegate.lastRecognitionResult, "继续识别前后的完整结果")
+        XCTAssertEqual(delegate.accumulatedText, "")
+        XCTAssertNil(delegate.inputPanel)
+    }
+
+    @MainActor
     func testEditingCancelMakesEditedTextTheLatestRecognitionResult() {
         _ = NSApplication.shared
 

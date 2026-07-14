@@ -44,7 +44,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     // 以下属性为 internal 以供 AppDelegate+Tests.swift extension 访问
     var isRecording = false
     var accumulatedText: String = ""
-    /// 最后一次成功写出的识别结果（ASR 原文或编辑后文本）。
+    /// 最近一次可复用的非空识别结果（ASR 原文或编辑后文本，包括按 ESC 取消插入的文本）。
     /// 供"粘贴最后识别结果"全局快捷键使用。Personal / Distribution 两版独立存储，互不共享。
     var lastRecognitionResult: String = ""
     /// 本 app 在后台时记录的前台应用，粘贴时先激活它再注入，否则注入会发到本 app 无效
@@ -962,6 +962,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     /// ESC 取消：关闭面板，不插入文字
     func cancelRecording() {
         Log.log("cancelRecording: 取消录音，不插入文字")
+        // ESC 只取消本次自动插入；当前识别文字仍应成为 Option+V 的最近结果。
+        // 优先读取面板，以保留“继续识别”流程中旧编辑文本与新 ASR 的合并结果。
+        let currentText = (inputPanel?.getCurrentText() ?? accumulatedText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if !currentText.isEmpty {
+            lastRecognitionResult = currentText
+        }
+
         finalResultTimer?.cancel()
         finalResultTimer = nil
         isRecording = false
