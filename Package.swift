@@ -20,5 +20,10 @@ let package = Package(
                 .linkedFramework("ApplicationServices"),
             ]
         ),
+        .testTarget(
+            name: "VoiceInputTests",
+            dependencies: ["VoiceInput"],
+            path: "Tests/VoiceInputTests"
+        ),
     ]
 )

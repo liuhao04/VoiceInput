@@ -56,8 +56,15 @@ run_asr_test() {
 
 run_build_test() {
   local label="$1"
-  echo "========== ${label}构建 VoiceInput App =========="
+  echo "========== ${label}Swift 回归测试 =========="
   cd "$PROJECT_DIR"
+  if ! swift test 2>&1; then
+    echo "FAIL: Swift 回归测试未通过"
+    exit 1
+  fi
+  echo "PASS: Swift 回归测试通过"
+
+  echo "========== ${label}构建 VoiceInput App =========="
   if ! swift build -c release 2>&1; then
     echo "FAIL: App 构建失败"
     exit 1

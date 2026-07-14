@@ -1369,6 +1369,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             let appName = target?.localizedName ?? "未知"
             let originalText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             RecognitionHistory.append(text: trimmed, app: appName, originalText: originalText)
+            lastRecognitionResult = trimmed
             Log.log("handleEditingCancelled: 已记录到历史，文本长度=\(trimmed.count)")
         }
 
