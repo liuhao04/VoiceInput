@@ -875,7 +875,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         Log.log("startRecording 开始, inputPanel==nil: \(inputPanel == nil)")
         accumulatedText = ""
-        lastStreamingResultTime = 0
         isRecording = true
         updateStatusIcon()
 
@@ -989,12 +988,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     /// 等待二遍识别的超时定时器
     private var finalResultTimer: DispatchWorkItem?
-    /// 录音中一遍识别结果间隔检测：超过阈值没有新结果则显示动态点
-    private var streamingIdleTimer: DispatchWorkItem?
-    /// 动态点自动停止 timer：显示动态点后若长时间无新结果则自动停止
-    private var dotsAutoStopTimer: DispatchWorkItem?
-    /// 上一次收到一遍识别结果的时间戳
-    private var lastStreamingResultTime: CFAbsoluteTime = 0
 
     private func stopRecording() {
         Log.log("stopRecording 开始, accumulatedText 长度=\(accumulatedText.count)")
@@ -1006,12 +999,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
            inputPanel?.panel.isVisible == false {
             inputPanel?.panel.orderFrontRegardless()
         }
-
-        // 取消录音中空闲检测 timer
-        streamingIdleTimer?.cancel()
-        streamingIdleTimer = nil
-        dotsAutoStopTimer?.cancel()
-        dotsAutoStopTimer = nil
 
         // 停止音频捕获
         audioCapture?.stop()
@@ -1045,20 +1032,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         asr?.sendLastPacket()
 
         // 显示动态等待点，提示用户正在等待二遍识别
-        // 先停掉录音期间可能残留的动态点，再重新启动
-        inputPanel?.hideWaitingDots()
         inputPanel?.showWaitingDots()
 
-        // 设置超时：最多等 2 秒，超时后使用当前结果自动插入
+        // 设置超时：最多等 1.2 秒（实测 p90=607ms, max=938ms），超时后使用当前结果自动插入
         let timeout = DispatchWorkItem { [weak self] in
             guard let self = self else { return }
             Log.log("stopRecording: 等待二遍识别超时，使用当前结果插入")
             self.finishAndInsertText()
         }
         finalResultTimer = timeout
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: timeout)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2, execute: timeout)
 
-        Log.log("stopRecording: 已发负包，等待二遍识别结果（最多2秒）")
+        Log.log("stopRecording: 已发负包，等待二遍识别结果（最多1.2秒）")
     }
 
     /// 二遍识别结果到达或超时后，插入文本
@@ -1156,10 +1141,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 let point = cursorOrMouseScreenPoint()
             panel.show(near: point)
         }
-        // 收到新结果时停止动态点
-        inputPanel?.hideWaitingDots()
-        dotsAutoStopTimer?.cancel()
-        dotsAutoStopTimer = nil
         inputPanel?.insertOrReplaceASRText(replaced)
 
         // 收到二遍识别最终结果（flags=0x03），自动插入
@@ -1168,43 +1149,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             finishAndInsertText()
             return
         }
-
-        if isRecording {
-            let now = CFAbsoluteTimeGetCurrent()
-            let gap = now - lastStreamingResultTime
-            lastStreamingResultTime = now
-            if gap < 2.0 {
-                // 密集流式结果（正在说话）：启动空闲 timer，停顿后显示动态点
-                resetStreamingIdleTimer()
-            } else {
-                // 回溯修正结果（长间隔后到达）：结果已稳定，不再启动 timer
-                streamingIdleTimer?.cancel()
-                streamingIdleTimer = nil
-            }
-        } else if finalResultTimer != nil {
-            // 已停止录音但还在等二遍结果：在途一遍结果到达后恢复动态点
-            inputPanel?.showWaitingDots()
-        }
-    }
-
-    /// 重置录音中空闲检测 timer：800ms 没有新一遍结果则显示动态点
-    private func resetStreamingIdleTimer() {
-        streamingIdleTimer?.cancel()
-        dotsAutoStopTimer?.cancel()
-        let idle = DispatchWorkItem { [weak self] in
-            guard let self = self, self.isRecording else { return }
-            self.inputPanel?.showWaitingDots()
-            // 显示动态点后，最多再等 4 秒（回溯修正通常在 2.5-4.7s 内到达）
-            // 超时则认为结果已稳定，自动停止动态点
-            let autoStop = DispatchWorkItem { [weak self] in
-                guard let self = self, self.isRecording else { return }
-                self.inputPanel?.hideWaitingDots()
-            }
-            self.dotsAutoStopTimer = autoStop
-            DispatchQueue.main.asyncAfter(deadline: .now() + 4.0, execute: autoStop)
-        }
-        streamingIdleTimer = idle
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.8, execute: idle)
     }
 
     /// 返回面板显示位置：优先使用文本光标位置，失败则使用鼠标位置
