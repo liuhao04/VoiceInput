@@ -109,3 +109,5 @@ dist/
 
 # 第三方参考资料 PDF（有版权，不入库）
 docs/*.pdf
+buildServer.json
+.compile
