@@ -89,7 +89,8 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
    - Last packet: empty audio with header `[0x11, 0x22, 0x00, 0x00]`
    - Streaming results: Updates `accumulatedText` with latest full result (not incremental)
 5. **VoiceInputPanel.swift**: Floating panel near cursor showing live transcription
-6. **PasteboardPaste.swift**: On stop, activates last frontmost app and simulates Cmd+V
+6. **TextCorrector.swift**: 可选的大模型修正（见下方 "AI 修正"）
+7. **PasteboardPaste.swift**: On stop, activates last frontmost app and simulates Cmd+V
 
 **Critical Implementation Details:**
 - Audio capture starts immediately when recording begins (before WebSocket is ready)
@@ -102,6 +103,47 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 - Non-sensitive config (Resource ID, ASR mode) stored in UserDefaults
 - Environment variables (`VOLC_APP_ID`, `VOLC_ACCESS_TOKEN`, `VOLC_BOOSTING_TABLE_ID`) can override stored values
 - API endpoint: `wss://openspeech.bytedance.com/api/v3/sauc/bigmodel_async`（由 `asrMode` 派生）
+
+## AI 修正（TextCorrector.swift）
+
+可选功能，默认关闭。产品方案见 `docs/ai-correction-product-spec.md`（含未实现的第二、三步）。
+
+**两档模式**
+- 单击触发键 = **精修档**：ASR → 替换规则 → 大模型修正 → 粘贴
+- 开始录音后 0.5 秒内再点一次 = 本次**降为快速档**：直接粘贴，不修正
+
+降档判定放在 `toggleRecording()` 的 300ms 防抖**之前**（双击的第二拍天然落在防抖窗口里）。
+之所以用"录音开始后的短窗口"而不是延迟启动来区分单双击，是因为档位只在停止录音时才起作用，
+第二拍可以在录音已开始后到达，这样启动和停止都是零额外延迟。
+
+**不可违反的约束**
+- **先修正再粘贴**。绝不改写已经贴出去的文本（要模拟选中+删除+重粘，失败会破坏用户文档）
+- **任何失败都降级为粘贴原文**：无 key、网络失败、超时、响应异常、用户中断，全部走 `insertFinalText(原文)`
+- `Config.correctionTimeout`（默认 6s）是硬上限。`TextCorrector.correct` 用本地定时器兜底，
+  即使 URLSession 不回调也保证在预算内解除面板等待
+- ESC / 再按触发键 = 放弃修正、立即粘贴原文（不是丢弃文本）
+
+**GLM 接入的两条硬经验**（来自 ai-info 项目实测，不要重新踩）
+- **必须关 thinking**：payload 里带 `"thinking": {"type": "disabled"}`。GLM-4.7 及以后默认是
+  thinking 模型，不关会烧上百 reasoning token、延迟几十秒，且 thinking 吃 max_tokens 预算导致输出截断
+- **不要用免费 `glm-4.7-flash`**：共享池拥塞（429 code 1305）会把请求拖到分钟级。
+  `CorrectionQuality` 的任何档位都不得映射到它，有测试守着
+
+**prompt 的两个实测结论**（改 prompt 前先看）
+- 分段必须写重。只说"按语义分段换行"时模型一个换行都不给，159 字口述照样堆成一整段；
+  加上"宁可多分一段，也不要堆成一坨"之后才真的分段
+- 末尾结束标点要显式禁止。语音结果常被粘进搜索框和命令行，尾巴上一个句号很碍事。
+  prompt 里禁止 + `normalizeCorrectedText` 本地兜底（这是确定性处理，符合"本地只做确定性处理"的通则）
+
+**设计通则**：本地只做确定性的、无歧义的处理；任何需要语义判断的一律交给模型。
+反例：本地赘词词表、`<40字不分段` 字符阈值、把映射式替换规则喂给模型。
+
+**配置**：`correctionEnabled` / `correctionService` / `correctionQuality` / `correctionTimeout`
+存 UserDefaults；API Key 走 `CredentialsStore`（`glmApiKey`），可被环境变量 `GLM_API_KEY` 覆盖。
+设置界面第 4 个 Tab。
+
+**上下文**：`AppDelegate.recentContext` 是内存里的环形缓冲（最近 5 条实际采纳的文本）。
+刻意不读历史文件——历史默认存 iCloud，同步阻塞会拖慢粘贴这条关键路径。
 
 ## Development Workflow Guidelines
 

@@ -58,6 +58,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     /// 编辑模式专用：进入编辑模式时保存的目标应用（防止编辑过程中被定时器更新）
     var editModeTargetApp: NSRunningApplication?
 
+    // MARK: - AI 修正
+
+    /// 本次录音会话的档位。单击触发键 = 精修（走大模型修正），
+    /// 录音刚开始的窗口内再点一次 = 降档为快速（直出，不修正）。
+    enum RecordingMode {
+        case refined
+        case fast
+    }
+    var currentRecordingMode: RecordingMode = .refined
+    /// 本次录音的开始时间，用于判定"第二击"是降档还是停止
+    var recordingStartTime: CFAbsoluteTime = 0
+    /// 双击降档的判定窗口。录音刚开始这么短的时间内没人会真想停止，
+    /// 所以这个窗口内的第二次触发一定是双击的后半拍。
+    let doubleTapFastModeWindow: CFTimeInterval = 0.5
+    /// 是否正在等待大模型修正结果（面板停留、尚未粘贴）
+    var isCorrecting = false
+    /// 放弃当前修正的闭包（ESC / 再次按触发键时调用）
+    var abortCorrection: (() -> Void)?
+    /// 最近几次实际采纳的输入，作为修正的上下文。
+    /// 存内存不读历史文件：历史默认在 iCloud，同步阻塞会拖慢粘贴这条关键路径。
+    /// 采纳的文本已经是"用户手改 > 修正后 > ASR 原文"的最终结果，正是上下文该用的版本。
+    var recentContext: [String] = []
+
     // MARK: - 全局快捷键
     private var hotkeyTap: CFMachPort?
     /// 记录上次 flagsChanged 时按下的修饰键集合，用于判断"单独按下并释放"
@@ -271,6 +294,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 if type == .keyDown && event.getIntegerValueField(.keyboardEventKeycode) == 53 {
                     if delegate.inputPanel?.isEditing == true {
                         // 编辑模式：ESC 由 NSTextView 处理（追加识别取消 / 退出编辑）
+                    } else if delegate.isCorrecting {
+                        // 等修正结果时按 ESC：放弃修正、立刻粘贴原文（不是丢弃文本）
+                        Log.log("[Hotkey] 修正等待期按 ESC，放弃修正直接粘贴原文")
+                        DispatchQueue.main.async {
+                            delegate.abortCorrection?()
+                        }
                     } else if delegate.isRecording || delegate.inputPanel?.panel.isVisible == true {
                         Log.log("[Hotkey] 检测到 ESC 键，取消录音")
                         DispatchQueue.main.async {
@@ -842,6 +871,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     @objc func toggleRecording() {
         let now = CFAbsoluteTimeGetCurrent()
+
+        // 正在等修正结果时按触发键：放弃修正，立刻粘贴原文。
+        // 修正是增强，用户随时可以选择不等。
+        if isCorrecting {
+            Log.log("[Correct] 触发键中断修正，直接粘贴原文")
+            abortCorrection?()
+            return
+        }
+
+        // 双击降档：录音刚开始的窗口内再触发一次，视为"本次改用快速档"，不停止录音。
+        // 必须放在防抖之前 —— 双击的第二拍天然落在 300ms 防抖窗口里。
+        if isRecording,
+           currentRecordingMode == .refined,
+           Config.triggerActivation == .singleTap,
+           now - recordingStartTime < doubleTapFastModeWindow {
+            currentRecordingMode = .fast
+            lastToggleTime = now
+            inputPanel?.showFastModeBadge()
+            Log.log("[Correct] 双击降档：本次会话改用快速模式，不做 AI 修正")
+            return
+        }
+
         let elapsed = now - lastToggleTime
 
         // 防抖：300ms 内不允许再次触发（防止 Karabiner 等工具的快速连续事件）
@@ -876,6 +927,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         Log.log("startRecording 开始, inputPanel==nil: \(inputPanel == nil)")
         accumulatedText = ""
         isRecording = true
+        // 默认精修档；双击的第二拍会在 doubleTapFastModeWindow 内把它降为 .fast
+        currentRecordingMode = .refined
+        recordingStartTime = CFAbsoluteTimeGetCurrent()
         updateStatusIcon()
 
         // 立即记录当前前台应用（在 VoiceInput 抢占焦点之前）
@@ -971,6 +1025,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
         finalResultTimer?.cancel()
         finalResultTimer = nil
+        // 修正在途时被取消：丢弃修正，文本仍按 ESC 语义不插入
+        isCorrecting = false
+        abortCorrection = nil
         isRecording = false
         updateStatusIcon()
         stopPanelBindingObserver()
@@ -1107,28 +1164,92 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // 隐藏面板
+        guard !text.isEmpty else {
+            orderOutAuxWindowsIfFrontmost()
+            inputPanel?.hide()
+            inputPanel = nil
+            Log.log("无识别文字，不插入")
+            return
+        }
+
+        // 快速档 或 未配置修正服务：维持原有的"直接粘贴"行为，零回归
+        guard currentRecordingMode == .refined, TextCorrector.isReady else {
+            if currentRecordingMode == .fast {
+                Log.log("[Correct] 快速模式，跳过 AI 修正")
+            } else if Config.correctionEnabled {
+                Log.log("[Correct] 已启用但缺少 API Key，跳过 AI 修正")
+            }
+            insertFinalText(text, originalText: text)
+            return
+        }
+
+        beginCorrection(for: text)
+    }
+
+    /// 先修正再粘贴：面板留着显示进度，绝不改写已经贴出去的内容。
+    /// 无论成功、失败、超时还是用户中断，最终一定会走到 insertFinalText。
+    private func beginCorrection(for original: String) {
+        // 用户切走时面板可能被 orderOut，修正等待期要恢复显示
+        if inputPanel?.panel.isVisible == false {
+            inputPanel?.panel.orderFrontRegardless()
+        }
+        inputPanel?.showCorrectingState()
+        isCorrecting = true
+
+        let cancel = TextCorrector.shared.correct(text: original, context: recentContext) { [weak self] result in
+            guard let self = self, self.isCorrecting else { return }
+            self.isCorrecting = false
+            self.abortCorrection = nil
+
+            switch result {
+            case .success(let corrected):
+                if corrected == original {
+                    Log.log("[Correct] 模型未做改动")
+                } else {
+                    Log.log("[Correct] 已修正：\(original.count)字 → \(corrected.count)字")
+                }
+                self.insertFinalText(corrected, originalText: original)
+            case .failure(let err):
+                // 任何失败都降级为原文粘贴，绝不阻断语音输入
+                Log.log("[Correct] 降级为原文粘贴，原因：\(err.userMessage)")
+                self.insertFinalText(original, originalText: original)
+            }
+        }
+        abortCorrection = cancel
+    }
+
+    /// 关闭面板并把最终文本注入目标应用。
+    /// `originalText` 是修正前的 ASR 结果，与最终文本不同时会一并记入历史。
+    private func insertFinalText(_ text: String, originalText: String) {
         orderOutAuxWindowsIfFrontmost()
         inputPanel?.hide()
         inputPanel = nil
 
-        if !text.isEmpty {
-            let appName: String
-            if let target = lastFrontmostApp {
-                appName = target.localizedName ?? "未知"
-                let bid = target.bundleIdentifier ?? "?"
-                Log.log("将注入 \(text.count) 字到目标应用: \(appName) (\(bid))")
-                PasteboardPaste.paste(text: text, activateTarget: target)
-            } else {
-                appName = "未知"
-                Log.log("无记录的前台应用，已复制到剪贴板")
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(text, forType: .string)
-            }
-            RecognitionHistory.append(text: text, app: appName)
-            lastRecognitionResult = text
+        let appName: String
+        if let target = lastFrontmostApp {
+            appName = target.localizedName ?? "未知"
+            let bid = target.bundleIdentifier ?? "?"
+            Log.log("将注入 \(text.count) 字到目标应用: \(appName) (\(bid))")
+            PasteboardPaste.paste(text: text, activateTarget: target)
         } else {
-            Log.log("无识别文字，不插入")
+            appName = "未知"
+            Log.log("无记录的前台应用，已复制到剪贴板")
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+        }
+        RecognitionHistory.append(text: text, app: appName, originalText: originalText)
+        lastRecognitionResult = text
+        rememberContext(text)
+    }
+
+    /// 把实际采纳的文本记进上下文环形缓冲。
+    /// 采纳的文本已经是"用户手改 > 模型修正 > ASR 原文"的最终版本，正是下次修正该参考的。
+    func rememberContext(_ text: String) {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        recentContext.append(trimmed)
+        if recentContext.count > TextCorrector.contextLimit {
+            recentContext.removeFirst(recentContext.count - TextCorrector.contextLimit)
         }
     }
 
@@ -1296,6 +1417,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             let originalText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             RecognitionHistory.append(text: trimmed, app: appName, originalText: originalText)
             lastRecognitionResult = trimmed
+            // 用户手改过的文本是最强信号，优先作为后续修正的上下文
+            rememberContext(trimmed)
 
             // 清理编辑模式保存的目标应用
             editModeTargetApp = nil
@@ -1322,6 +1445,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             let originalText = accumulatedText.trimmingCharacters(in: .whitespacesAndNewlines)
             RecognitionHistory.append(text: trimmed, app: appName, originalText: originalText)
             lastRecognitionResult = trimmed
+            rememberContext(trimmed)
             Log.log("handleEditingCancelled: 已记录到历史，文本长度=\(trimmed.count)")
         }
 

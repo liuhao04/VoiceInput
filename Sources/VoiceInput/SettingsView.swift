@@ -112,6 +112,13 @@ struct SettingsView: View {
     @State private var asrMode: ASRMode = Config.asrMode
     @State private var boostingTableId: String = Config.boostingTableId
 
+    @State private var correctionEnabled: Bool = Config.correctionEnabled
+    @State private var correctionService: CorrectionService = Config.correctionService
+    @State private var correctionQuality: CorrectionQuality = Config.correctionQuality
+    @State private var correctionAPIKey: String = Config.correctionAPIKey
+    @State private var correctionTimeout: Double = Config.correctionTimeout
+    @State private var correctionSaveStatus: String? = nil
+
     @State private var replaceRulesFilePath: String = Config.replaceRulesFilePath
     @State private var replaceRules: [ReplaceRule] = TextReplacer.shared.rules
     @State private var selectedRuleIndex: Int? = nil
@@ -144,6 +151,9 @@ struct SettingsView: View {
             replaceTab
                 .tabItem { Label("词语替换", systemImage: "arrow.left.arrow.right") }
                 .tag(2)
+            correctionTab
+                .tabItem { Label("AI 修正", systemImage: "wand.and.stars") }
+                .tag(3)
         }
         .frame(width: 560, height: 520)
         .onAppear { selectedTab = initialTab }
@@ -513,6 +523,126 @@ struct SettingsView: View {
     }
 
     // MARK: - Subviews
+
+    // MARK: - Tab 4: AI 修正
+
+    private var correctionTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                sectionHeader("AI 修正")
+
+                Toggle("启用 AI 修正", isOn: $correctionEnabled)
+                    .padding(.leading, 4)
+
+                Text("单击触发键 = 精修模式，识别结果经大模型修正错别字、专有名词，并按语义分段后再粘贴。\n开始录音后 0.5 秒内再点一次触发键 = 本次降为快速模式，直接粘贴不做修正。")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.leading, 4)
+
+                Divider()
+
+                VStack(spacing: 10) {
+                    HStack(spacing: 8) {
+                        Text("修正服务:")
+                            .frame(width: labelWidth, alignment: .trailing)
+                        Picker("", selection: $correctionService) {
+                            ForEach(CorrectionService.allCases, id: \.rawValue) { s in
+                                Text(s.displayName).tag(s)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.menu)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .onChange(of: correctionService) { _ in
+                        correctionAPIKey = Config.correctionAPIKey
+                    }
+
+                    HStack(spacing: 8) {
+                        Text("质量档:")
+                            .frame(width: labelWidth, alignment: .trailing)
+                        Picker("", selection: $correctionQuality) {
+                            ForEach(CorrectionQuality.allCases, id: \.rawValue) { q in
+                                Text(q.displayName).tag(q)
+                            }
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 240, alignment: .leading)
+                        Text(correctionQuality.model(for: correctionService))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+
+                    formRow("API Key:", text: $correctionAPIKey)
+
+                    HStack(spacing: 8) {
+                        Text("修正超时:")
+                            .frame(width: labelWidth, alignment: .trailing)
+                        Stepper(
+                            value: $correctionTimeout,
+                            in: 2...15,
+                            step: 1
+                        ) {
+                            Text("\(Int(correctionTimeout)) 秒")
+                                .font(.system(size: 12, design: .monospaced))
+                        }
+                        .frame(maxWidth: 160, alignment: .leading)
+                        Text("超时后放弃修正，直接粘贴原文")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 4) {
+                        Text("API Key 从")
+                        Link("智谱开放平台", destination: URL(string: correctionService.credentialURL)!)
+                        Text("获取，按量计费。")
+                    }
+                    Text("修正时会把这次识别结果和最近 \(TextCorrector.contextLimit) 次输入发送到所选服务商，用作判断用词习惯的上下文。不需要这项能力时请关闭本功能。")
+                        .foregroundColor(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .font(.caption)
+
+                Spacer(minLength: 8)
+
+                HStack {
+                    if let status = correctionSaveStatus {
+                        Text(status)
+                            .foregroundColor(status.hasPrefix("已保存") ? .secondary : .red)
+                            .font(.caption)
+                    }
+                    Spacer()
+                    Button("保存") {
+                        saveCorrectionSettings()
+                    }
+                }
+            }
+            .padding(24)
+        }
+    }
+
+    private func saveCorrectionSettings() {
+        let key = correctionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        if correctionEnabled && key.isEmpty {
+            correctionSaveStatus = "启用 AI 修正需要填写 API Key"
+            return
+        }
+
+        Config.correctionService = correctionService
+        Config.correctionAPIKey = key
+        Config.correctionQuality = correctionQuality
+        Config.correctionTimeout = correctionTimeout
+        Config.correctionEnabled = correctionEnabled
+        correctionAPIKey = key
+        correctionSaveStatus = "已保存"
+        Log.log("[Settings] AI 修正配置已保存 enabled=\(correctionEnabled) service=\(correctionService.rawValue) quality=\(correctionQuality.rawValue) timeout=\(Int(correctionTimeout))s")
+    }
 
     private func sectionHeader(_ title: String) -> some View {
         Text(title)

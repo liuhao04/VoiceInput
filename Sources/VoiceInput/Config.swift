@@ -112,6 +112,8 @@ enum Config {
     private static let envVolcAppId = ProcessInfo.processInfo.environment["VOLC_APP_ID"]
     private static let envVolcAccessToken = ProcessInfo.processInfo.environment["VOLC_ACCESS_TOKEN"]
     private static let envBoostingTableId = ProcessInfo.processInfo.environment["VOLC_BOOSTING_TABLE_ID"]
+    /// 与 ai-info 等项目共用同一个环境变量名，便于从终端启动时直接复用
+    private static let envGlmApiKey = ProcessInfo.processInfo.environment["GLM_API_KEY"]
     private static let defaultVolcResourceId = "volc.seedasr.sauc.duration"
     private static let asrWebSocketHost = "wss://openspeech.bytedance.com"
     private static let defaultReplaceWordsId = ""
@@ -131,6 +133,11 @@ enum Config {
     private static let triggerActivationKey = "triggerActivation"
     private static let historyEnabledKey = "historyEnabled"
     private static let historyStorageLocationKey = "historyStorageLocation"
+    private static let correctionEnabledKey = "correctionEnabled"
+    private static let correctionServiceKey = "correctionService"
+    private static let correctionQualityKey = "correctionQuality"
+    private static let correctionTimeoutKey = "correctionTimeout"
+    private static let glmApiKeyKey = "glmApiKey"
 
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
@@ -195,6 +202,18 @@ enum Config {
             if let historyStorageLocation = oldDefaults.string(forKey: historyStorageLocationKey) {
                 UserDefaults.standard.set(historyStorageLocation, forKey: historyStorageLocationKey)
             }
+            if oldDefaults.object(forKey: correctionEnabledKey) != nil {
+                UserDefaults.standard.set(oldDefaults.bool(forKey: correctionEnabledKey), forKey: correctionEnabledKey)
+            }
+            if let v = oldDefaults.string(forKey: correctionServiceKey) {
+                UserDefaults.standard.set(v, forKey: correctionServiceKey)
+            }
+            if let v = oldDefaults.string(forKey: correctionQualityKey) {
+                UserDefaults.standard.set(v, forKey: correctionQualityKey)
+            }
+            if oldDefaults.object(forKey: correctionTimeoutKey) != nil {
+                UserDefaults.standard.set(oldDefaults.double(forKey: correctionTimeoutKey), forKey: correctionTimeoutKey)
+            }
         }
 
         UserDefaults.standard.set(true, forKey: personalMigrationKey)
@@ -219,7 +238,7 @@ enum Config {
 
         var target = CredentialsStore.load()
         var copied = 0
-        for key in [volcAppIdKey, volcAccessTokenKey, boostingTableIdKey, replaceWordsIdKey] {
+        for key in [volcAppIdKey, volcAccessTokenKey, boostingTableIdKey, replaceWordsIdKey, glmApiKeyKey] {
             guard (target[key]?.isEmpty ?? true), let value = source[key], !value.isEmpty else {
                 continue
             }
@@ -365,5 +384,66 @@ enum Config {
             return location
         }
         set { UserDefaults.standard.set(newValue.rawValue, forKey: historyStorageLocationKey) }
+    }
+
+    // MARK: - AI 修正
+
+    /// 是否启用大模型修正。默认关：用户必须先填 API Key 才有意义。
+    static var correctionEnabled: Bool {
+        get { UserDefaults.standard.bool(forKey: correctionEnabledKey) }
+        set { UserDefaults.standard.set(newValue, forKey: correctionEnabledKey) }
+    }
+
+    static var correctionService: CorrectionService {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: correctionServiceKey),
+                  let v = CorrectionService(rawValue: raw) else { return .glm }
+            return v
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: correctionServiceKey) }
+    }
+
+    static var correctionQuality: CorrectionQuality {
+        get {
+            guard let raw = UserDefaults.standard.string(forKey: correctionQualityKey),
+                  let v = CorrectionQuality(rawValue: raw) else { return .balanced }
+            return v
+        }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: correctionQualityKey) }
+    }
+
+    /// 本地预算：超过这个时间就放弃修正、直接粘贴原文。
+    /// 语音输入绝不能卡死等模型，所以这是硬上限而非建议值。
+    static var correctionTimeout: Double {
+        get {
+            let v = UserDefaults.standard.double(forKey: correctionTimeoutKey)
+            guard v > 0 else { return 6.0 }
+            return min(max(v, 1.0), 30.0)
+        }
+        set { UserDefaults.standard.set(min(max(newValue, 1.0), 30.0), forKey: correctionTimeoutKey) }
+    }
+
+    /// 当前服务商对应的模型 ID（由质量档映射）
+    static var correctionModelID: String {
+        correctionQuality.model(for: correctionService)
+    }
+
+    /// 当前服务商对应的 API Key
+    static var correctionAPIKey: String {
+        get {
+            switch correctionService {
+            case .glm: return glmApiKey
+            }
+        }
+        set {
+            switch correctionService {
+            case .glm: glmApiKey = newValue
+            }
+        }
+    }
+
+    static var glmApiKey: String {
+        get { envGlmApiKey ?? CredentialsStore.get(glmApiKeyKey) ?? "" }
+        set { CredentialsStore.set(glmApiKeyKey, newValue) }
     }
 }

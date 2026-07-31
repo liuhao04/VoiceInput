@@ -42,6 +42,9 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     var onEditingCancelled: (() -> Void)?
     var onContinueRecording: (() -> Void)?
     private(set) var isEditing = false
+    /// 覆盖 hint 栏文案的临时状态（AI 修正中 / 已降档提示）。
+    /// 非 nil 时 updateHintText 不再写回默认文案。
+    private var hintOverride: String?
     /// ASR 文本在 textView 中的插入起点
     private var asrInsertionPoint: Int = 0
     /// ASR 当前已插入的文本长度（用于替换更新）
@@ -157,6 +160,12 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     }
 
     private func updateHintText() {
+        if let override = hintOverride {
+            hintLabel.stringValue = override
+            continueButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2
+            return
+        }
         if isEditing {
             hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 确认插入    tip:可在识别历史中查看"
             continueButton.isHidden = false
@@ -344,6 +353,31 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         panel.setFrame(newFrame, display: true, animate: false)
     }
 
+    // MARK: - AI 修正状态
+
+    /// 进入"AI 修正中"状态：保持面板可见，末尾转圈，hint 栏提示可直接粘贴原文
+    func showCorrectingState() {
+        hintOverride = "AI 修正中…    ESC / 快捷键 : 直接粘贴原文"
+        updateHintText()
+        showWaitingDots()
+    }
+
+    /// 提示本次会话已降档为快速模式（双击触发键的效果）
+    func showFastModeBadge() {
+        hintOverride = "已切换为快速模式（本次不做 AI 修正）"
+        updateHintText()
+        // 2 秒后恢复常规提示，避免用户误以为面板卡住
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, self.hintOverride?.hasPrefix("已切换为快速模式") == true else { return }
+            self.clearHintOverride()
+        }
+    }
+
+    func clearHintOverride() {
+        hintOverride = nil
+        updateHintText()
+    }
+
     /// 在文字末尾显示旋转等待图标
     func showWaitingDots() {
         guard !isEditing else { return }
@@ -401,6 +435,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
 
     func hide() {
         hideWaitingDots()
+        hintOverride = nil
         if isEditing {
             exitEditMode()
         }
