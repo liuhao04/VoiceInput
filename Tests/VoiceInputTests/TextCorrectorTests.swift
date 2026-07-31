@@ -8,22 +8,60 @@ final class TextCorrectorTests: XCTestCase {
     // MARK: - 质量档 → 模型映射
 
     func testQualityMapsToConcreteModelIDs() {
-        XCTAssertEqual(CorrectionQuality.balanced.model(for: .glm), "glm-5.2")
-        XCTAssertEqual(CorrectionQuality.high.model(for: .glm), "glm-5.2")
-        XCTAssertEqual(CorrectionQuality.fast.model(for: .glm), "glm-4.7-flashx")
+        for quality in CorrectionQuality.allCases {
+            XCTAssertEqual(quality.model(for: .glm), "glm-5.2")
+        }
     }
 
-    /// 免费 flash 档在 ai-info 实测会遭遇共享池拥塞（429 code 1305），
-    /// 把批次拖到分钟级。语音输入完全承受不了，任何档位都不得映射到它。
-    func testNoQualityMapsToTheCongestedFreeFlashModel() {
+    /// 免费 flash 档在 ai-info 实测会遭遇共享池拥塞（429 code 1305），把批次拖到分钟级。
+    /// `glm-4.7-flashx` 则在本账号 2026-07-31 实测 9/9 返回 429 code 1113 余额不足。
+    /// 两者都不得被任何档位选中 —— 选中等于每次白等一个往返再降级回原文。
+    func testNoQualityMapsToUnusableGLMModels() {
+        let banned = ["glm-4.7-flash", "glm-4.7-flashx", "glm-4-flash", "glm-4.6v-flash"]
         for quality in CorrectionQuality.allCases {
             let model = quality.model(for: .glm)
-            XCTAssertNotEqual(model, "glm-4.7-flash", "\(quality) 不得使用免费 flash 档")
-            XCTAssertFalse(
-                model.hasSuffix("-flash"),
-                "\(quality) 映射到了免费 flash 档 \(model)"
-            )
+            XCTAssertFalse(banned.contains(model), "\(quality) 映射到了不可用模型 \(model)")
+            XCTAssertFalse(model.contains("flash"), "\(quality) 映射到了 flash 系模型 \(model)")
         }
+    }
+
+    /// 服务商只有一个可用模型时不该给用户看三个档位 —— 那是假选择。
+    func testGLMReportsNoModelChoiceWhileItHasASingleModel() {
+        XCTAssertFalse(CorrectionService.glm.hasModelChoice)
+    }
+
+    // MARK: - 欠费识别
+
+    /// 修正失败会静默降级成粘贴原文，用户只会觉得"修正好像没生效"。
+    /// 欠费必须和一般故障分开，否则查不出原因（一个要充值，一个等等就好）。
+    func testArrearsDetectionByGLMErrorCode() {
+        XCTAssertTrue(TextCorrector.isArrears(code: "1113", message: "余额不足或无可用资源包,请充值。"))
+    }
+
+    func testArrearsDetectionByMessageWhenCodeMissing() {
+        XCTAssertTrue(TextCorrector.isArrears(code: "", message: "余额不足或无可用资源包,请充值。"))
+        XCTAssertTrue(TextCorrector.isArrears(code: "", message: "Insufficient balance"))
+    }
+
+    func testOrdinaryErrorsAreNotTreatedAsArrears() {
+        XCTAssertFalse(TextCorrector.isArrears(code: "1305", message: "该模型当前访问量过大"))
+        XCTAssertFalse(TextCorrector.isArrears(code: "1211", message: "模型不存在，请检查模型代码。"))
+    }
+
+    func testParseClassifiesArrearsErrorBody() {
+        let data = try! JSONSerialization.data(
+            withJSONObject: ["error": ["message": "余额不足或无可用资源包,请充值。", "code": "1113"]]
+        )
+        let result = TextCorrector.parseResponse(data, originalText: "x")
+        guard case .failure(.insufficientBalance) = result else {
+            return XCTFail("应识别为余额不足，实际 \(result)")
+        }
+    }
+
+    func testArrearsErrorHasActionableUserMessage() {
+        let msg = CorrectionError.insufficientBalance("余额不足").userMessage
+        XCTAssertTrue(msg.contains("余额不足"))
+        XCTAssertTrue(msg.contains("充值"))
     }
 
     // MARK: - Prompt 构建
@@ -166,13 +204,13 @@ final class TextCorrectorTests: XCTestCase {
 
     func testParseSurfacesServerErrorBody() {
         let data = try! JSONSerialization.data(
-            withJSONObject: ["error": ["message": "余额不足", "code": "1113"]]
+            withJSONObject: ["error": ["message": "该模型当前访问量过大", "code": "1305"]]
         )
         let result = TextCorrector.parseResponse(data, originalText: "x")
         guard case .failure(.badStatus(_, let msg)) = result else {
             return XCTFail("应识别为服务端错误，实际 \(result)")
         }
-        XCTAssertEqual(msg, "余额不足")
+        XCTAssertEqual(msg, "该模型当前访问量过大")
     }
 
     // MARK: - 本地归一化

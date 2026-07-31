@@ -126,8 +126,12 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 **GLM 接入的两条硬经验**（来自 ai-info 项目实测，不要重新踩）
 - **必须关 thinking**：payload 里带 `"thinking": {"type": "disabled"}`。GLM-4.7 及以后默认是
   thinking 模型，不关会烧上百 reasoning token、延迟几十秒，且 thinking 吃 max_tokens 预算导致输出截断
-- **不要用免费 `glm-4.7-flash`**：共享池拥塞（429 code 1305）会把请求拖到分钟级。
-  `CorrectionQuality` 的任何档位都不得映射到它，有测试守着
+- **不要用任何 flash 系模型**。免费 `glm-4.7-flash` 有共享池拥塞（429 code 1305），
+  请求会被拖到分钟级；付费 `glm-4.7-flashx` 在本账号 2026-07-31 实测 9/9 返回
+  429 code **1113 余额不足或无可用资源包**（glm-5.2 同一 key 正常 200）。
+  选中不可用模型等于每次白等一个往返再降级回原文。有测试守着，要加回来先用真实 key 打一次确认真的通
+- 因此 GLM 的三个质量档**全部映射到 `glm-5.2`**，设置界面据 `hasModelChoice`
+  自动隐藏档位选择（只有一个模型时摆三个档是假选择）。枚举保留是给 Claude API 用的
 
 **prompt 的两个实测结论**（改 prompt 前先看）
 - 分段必须写重。只说"按语义分段换行"时模型一个换行都不给，159 字口述照样堆成一整段；
@@ -137,6 +141,10 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 
 **设计通则**：本地只做确定性的、无歧义的处理；任何需要语义判断的一律交给模型。
 反例：本地赘词词表、`<40字不分段` 字符阈值、把映射式替换规则喂给模型。
+
+**欠费是静默失败**：修正失败一律降级为粘贴原文，用户只会觉得"修正好像没生效"。
+所以 `CorrectionError.insufficientBalance` 单独成一类（`isArrears` 认 code 1113 和余额类文案），
+设置界面有「测试」按钮打一次真实请求，把 key 错、欠费、网络不通区分开。
 
 **配置**：`correctionEnabled` / `correctionService` / `correctionQuality` / `correctionTimeout`
 存 UserDefaults；API Key 走 `CredentialsStore`（`glmApiKey`），可被环境变量 `GLM_API_KEY` 覆盖。

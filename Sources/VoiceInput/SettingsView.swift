@@ -118,6 +118,8 @@ struct SettingsView: View {
     @State private var correctionAPIKey: String = Config.correctionAPIKey
     @State private var correctionTimeout: Double = Config.correctionTimeout
     @State private var correctionSaveStatus: String? = nil
+    @State private var correctionStatusIsError: Bool = false
+    @State private var correctionTesting: Bool = false
 
     @State private var replaceRulesFilePath: String = Config.replaceRulesFilePath
     @State private var replaceRules: [ReplaceRule] = TextReplacer.shared.rules
@@ -559,21 +561,33 @@ struct SettingsView: View {
                         correctionAPIKey = Config.correctionAPIKey
                     }
 
-                    HStack(spacing: 8) {
-                        Text("质量档:")
-                            .frame(width: labelWidth, alignment: .trailing)
-                        Picker("", selection: $correctionQuality) {
-                            ForEach(CorrectionQuality.allCases, id: \.rawValue) { q in
-                                Text(q.displayName).tag(q)
+                    // 只有真正提供多个模型的服务商才显示档位选择。
+                    // GLM 目前只有一个可用模型，摆三个档位是假选择。
+                    if correctionService.hasModelChoice {
+                        HStack(spacing: 8) {
+                            Text("质量档:")
+                                .frame(width: labelWidth, alignment: .trailing)
+                            Picker("", selection: $correctionQuality) {
+                                ForEach(CorrectionQuality.allCases, id: \.rawValue) { q in
+                                    Text(q.displayName).tag(q)
+                                }
                             }
+                            .labelsHidden()
+                            .pickerStyle(.segmented)
+                            .frame(maxWidth: 240, alignment: .leading)
+                            Text(correctionQuality.model(for: correctionService))
+                                .font(.system(size: 11, design: .monospaced))
+                                .foregroundColor(.secondary)
+                            Spacer()
                         }
-                        .labelsHidden()
-                        .pickerStyle(.segmented)
-                        .frame(maxWidth: 240, alignment: .leading)
-                        Text(correctionQuality.model(for: correctionService))
-                            .font(.system(size: 11, design: .monospaced))
-                            .foregroundColor(.secondary)
-                        Spacer()
+                    } else {
+                        HStack(spacing: 8) {
+                            Text("模型:")
+                                .frame(width: labelWidth, alignment: .trailing)
+                            Text(correctionQuality.model(for: correctionService))
+                                .font(.system(size: 12, design: .monospaced))
+                            Spacer()
+                        }
                     }
 
                     formRow("API Key:", text: $correctionAPIKey)
@@ -614,10 +628,17 @@ struct SettingsView: View {
                 HStack {
                     if let status = correctionSaveStatus {
                         Text(status)
-                            .foregroundColor(status.hasPrefix("已保存") ? .secondary : .red)
+                            .foregroundColor(correctionStatusIsError ? .red : .secondary)
                             .font(.caption)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                     Spacer()
+                    // 修正失败会静默降级成粘贴原文，用户只会觉得"修正好像没生效"。
+                    // 给一个能主动打一次真实请求的入口，把 key 错、欠费、网络不通区分开。
+                    Button("测试") {
+                        testCorrectionConnection()
+                    }
+                    .disabled(correctionTesting)
                     Button("保存") {
                         saveCorrectionSettings()
                     }
@@ -627,9 +648,40 @@ struct SettingsView: View {
         }
     }
 
-    private func saveCorrectionSettings() {
+    /// 用当前界面上的配置打一次真实修正请求，把结果直接显示出来。
+    /// 保存后再测，避免测的是旧配置。
+    private func testCorrectionConnection() {
+        saveCorrectionSettings(silent: true)
+        guard !Config.correctionAPIKey.isEmpty else {
+            correctionStatusIsError = true
+            correctionSaveStatus = "请先填写 API Key"
+            return
+        }
+
+        correctionTesting = true
+        correctionStatusIsError = false
+        correctionSaveStatus = "测试中…"
+
+        let started = CFAbsoluteTimeGetCurrent()
+        let probe = "帮我打开 cloud 看一下"
+        TextCorrector.shared.correct(text: probe, context: ["我在用 Claude Code 写这个项目"]) { result in
+            correctionTesting = false
+            let cost = CFAbsoluteTimeGetCurrent() - started
+            switch result {
+            case .success(let corrected):
+                correctionStatusIsError = false
+                correctionSaveStatus = String(format: "连接正常，用时 %.1fs：%@", cost, corrected)
+            case .failure(let err):
+                correctionStatusIsError = true
+                correctionSaveStatus = err.userMessage
+            }
+        }
+    }
+
+    private func saveCorrectionSettings(silent: Bool = false) {
         let key = correctionAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         if correctionEnabled && key.isEmpty {
+            correctionStatusIsError = true
             correctionSaveStatus = "启用 AI 修正需要填写 API Key"
             return
         }
@@ -640,7 +692,10 @@ struct SettingsView: View {
         Config.correctionTimeout = correctionTimeout
         Config.correctionEnabled = correctionEnabled
         correctionAPIKey = key
-        correctionSaveStatus = "已保存"
+        if !silent {
+            correctionStatusIsError = false
+            correctionSaveStatus = "已保存"
+        }
         Log.log("[Settings] AI 修正配置已保存 enabled=\(correctionEnabled) service=\(correctionService.rawValue) quality=\(correctionQuality.rawValue) timeout=\(Int(correctionTimeout))s")
     }
 

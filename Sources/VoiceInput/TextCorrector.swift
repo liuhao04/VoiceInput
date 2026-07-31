@@ -42,20 +42,27 @@ enum CorrectionQuality: String, Codable, CaseIterable {
 
     /// 档位 → 具体模型 ID。
     ///
-    /// GLM 的选型依据（来自 ai-info 项目实测）：
-    /// - `glm-5.2` 为生产主力，稳定且质量足够
-    /// - `glm-4.7-flashx` 为付费快档，延迟更低
-    /// - **免费的 `glm-4.7-flash` 一律不用**：共享池拥塞（429 code 1305）会把
-    ///   请求拖到分钟级，语音输入完全承受不了
+    /// GLM 当前**所有档位都用 `glm-5.2`**，理由（2026-07-31 实测）：
+    /// - `glm-4.7-flashx` 在本账号上 9/9 调用返回 429 `1113 余额不足或无可用资源包`。
+    ///   选它等于每次都白等一个往返再降级回原文。**不要因为它在 ai-info 早期能用就加回来**，
+    ///   要加先用真实 key 打一次确认它真的通。
+    /// - 免费的 `glm-4.7-flash` 一律不用：共享池拥塞（429 code 1305）会把请求拖到分钟级。
+    /// - `glm-5.2` 短文本修正的实测中位延迟约 2.3s，质量够用，没有换档的必要。
+    ///
+    /// 枚举保留三档是为了 Claude API 接入时（Haiku / Sonnet / Opus 是真实差异）复用。
+    /// 服务商只有一个可用模型时，设置界面会自动隐藏档位选择（见 `hasModelChoice`）。
     func model(for service: CorrectionService) -> String {
         switch service {
         case .glm:
-            switch self {
-            case .fast: return "glm-4.7-flashx"
-            case .balanced: return "glm-5.2"
-            case .high: return "glm-5.2"
-            }
+            return "glm-5.2"
         }
+    }
+}
+
+extension CorrectionService {
+    /// 该服务商是否真的提供多个可选模型。只有一个时不给用户看假的档位选择。
+    var hasModelChoice: Bool {
+        Set(CorrectionQuality.allCases.map { $0.model(for: self) }).count > 1
     }
 }
 
@@ -70,6 +77,10 @@ enum CorrectionError: Error, Equatable {
     case network(String)
     /// HTTP 非 2xx
     case badStatus(Int, String)
+    /// 服务商账号余额不足 / 无可用资源包（GLM code 1113）。
+    /// 单独一类是因为修正失败会静默降级成粘贴原文，用户只会觉得"修正好像没生效"，
+    /// 不把欠费和一般网络故障区分开就查不出原因。
+    case insufficientBalance(String)
     /// 响应结构不符合预期
     case malformed
     /// 模型返回空内容
@@ -83,6 +94,7 @@ enum CorrectionError: Error, Equatable {
         case .timedOut: return "修正超时"
         case .cancelled: return "已取消修正"
         case .network: return "修正请求失败"
+        case .insufficientBalance: return "修正服务余额不足，请到服务商控制台充值"
         case .badStatus(let code, _): return "修正服务返回错误（\(code)）"
         case .malformed, .empty, .implausible: return "修正结果异常"
         }
@@ -197,6 +209,10 @@ final class TextCorrector {
         // 服务端错误体：{"error": {"message": ..., "code": ...}}
         if let err = root["error"] as? [String: Any] {
             let msg = (err["message"] as? String) ?? "未知错误"
+            let code = (err["code"] as? String) ?? String(describing: err["code"] ?? "")
+            if isArrears(code: code, message: msg) {
+                return .failure(.insufficientBalance(msg))
+            }
             return .failure(.badStatus(0, msg))
         }
         guard
@@ -217,6 +233,16 @@ final class TextCorrector {
             return .failure(.implausible)
         }
         return .success(cleaned)
+    }
+
+    /// 判断服务端错误是不是"账号没钱了"。
+    /// GLM 用 code `1113`，文案是"余额不足或无可用资源包,请充值"。
+    /// 这类错误和网络故障的处置完全不同（一个要充值，一个等一会儿就好），必须分开。
+    static func isArrears(code: String, message: String) -> Bool {
+        if code == "1113" { return true }
+        let markers = ["余额不足", "无可用资源包", "请充值", "欠费", "insufficient balance", "quota"]
+        let lowered = message.lowercased()
+        return markers.contains { lowered.contains($0.lowercased()) }
     }
 
     /// 修正结果的本地归一化。
@@ -335,6 +361,12 @@ final class TextCorrector {
                 return
             }
             if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                // 欠费是 HTTP 429 + body 里的 code 1113，先按错误体分类再退回通用状态码
+                if case .failure(let parsed) = Self.parseResponse(data, originalText: text),
+                   case .insufficientBalance = parsed {
+                    finish(.failure(parsed))
+                    return
+                }
                 let snippet = String(data: data.prefix(300), encoding: .utf8) ?? ""
                 finish(.failure(.badStatus(http.statusCode, snippet)))
                 return

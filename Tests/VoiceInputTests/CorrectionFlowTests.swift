@@ -56,10 +56,12 @@ final class CorrectionFlowTests: XCTestCase {
         XCTAssertEqual(Config.correctionTimeout, 8.0, accuracy: 0.001)
     }
 
+    /// 档位本身要能持久化（Claude API 接入后档位才有真实差异）；
+    /// 但 GLM 当前只有一个可用模型，所以换档不改 model ID。
     func testQualityRoundTripsThroughUserDefaults() {
         Config.correctionQuality = .fast
         XCTAssertEqual(Config.correctionQuality, .fast)
-        XCTAssertEqual(Config.correctionModelID, "glm-4.7-flashx")
+        XCTAssertEqual(Config.correctionModelID, "glm-5.2")
     }
 
     // MARK: - 就绪判定
