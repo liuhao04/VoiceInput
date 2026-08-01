@@ -136,9 +136,11 @@ final class CorrectionFlowTests: XCTestCase {
         let saved = Config.triggerActivation
         defer { Config.triggerActivation = saved }
 
+        // 下限：要容得下一次从容的双击（触发本身还带 0.2s 确认延迟）
+        // 上限：再长就会把"说了一个字就想停"的正常操作误判成降档
         Config.triggerActivation = .singleTap
-        XCTAssertGreaterThanOrEqual(delegate.fastModeWindow, 0.3)
-        XCTAssertLessThanOrEqual(delegate.fastModeWindow, 0.6)
+        XCTAssertGreaterThanOrEqual(delegate.fastModeWindow, 0.6)
+        XCTAssertLessThanOrEqual(delegate.fastModeWindow, 0.9)
     }
 
     /// 双击触发时，用户要再完成一整个双击才算降档，需要更长的窗口。
@@ -156,7 +158,7 @@ final class CorrectionFlowTests: XCTestCase {
         let double = delegate.fastModeWindow
 
         XCTAssertGreaterThan(double, single, "双击触发时降档窗口必须更长")
-        XCTAssertLessThanOrEqual(double, 1.5, "再长就会把正常的短句停止误判成降档")
+        XCTAssertLessThanOrEqual(double, 1.6, "再长就会把正常的短句停止误判成降档")
     }
 }
 

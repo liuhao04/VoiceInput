@@ -72,10 +72,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     /// 降档判定窗口：录音刚开始这么短的时间内没人会真想停止（一个字还没说完），
     /// 所以窗口内再次触发一定是"我要快速档"的意思。
     ///
-    /// 窗口长度随触发方式变化：单击触发时用户只需再点一下；双击触发时用户要再完成
-    /// 一整个双击（两拍加间隔），需要更长的时间。
+    /// 单击触发下，「单击开始 + 紧接着再点一下」合起来就是用户心里的"双击 = 快速档"。
+    /// 0.7s 而不是更短，是因为触发本身带 0.2s 确认延迟，窗口太紧会让从容的双击落空。
+    /// 双击触发下用户要再完成一整个双击（两拍加间隔），所以窗口更长。
     var fastModeWindow: CFTimeInterval {
-        Config.triggerActivation == .doubleTap ? 1.0 : 0.5
+        Config.triggerActivation == .doubleTap ? 1.2 : 0.7
     }
     /// 是否正在等待大模型修正结果（面板停留、尚未粘贴）
     var isCorrecting = false
