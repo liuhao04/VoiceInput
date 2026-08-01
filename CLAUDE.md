@@ -15,7 +15,12 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 
 ## Build & Install
 
-项目维护两个完全隔离的版本，从同一份代码构建：
+**2026-08-01 起只维护 Distribution 版。** Personal 版停止维护/构建/启动/使用，
+app 仍留在 `~/Applications/VoiceInput Personal.app`（未删除），但不再更新。
+两个版本从同一份代码构建、功能完全相同，唯一差别是菜单栏的紫色角标，日常并存没有收益。
+`./scripts/build-and-install.sh` 默认只装 Distribution；要装 Personal 用 `--personal` / `--personal-only`。
+
+下表保留两版对照，供理解隔离机制：
 
 | | Personal 版（个人开发） | Distribution 版（分发 / 本地对照） |
 |---|---|---|
@@ -31,7 +36,7 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 
 两个版本可以同时安装、同时运行，互不干扰。
 
-**每次代码改动 MUST 跑这个（默认装 Personal + Distribution 两个）：**
+**每次代码改动 MUST 跑这个（默认只装 Distribution）：**
 ```bash
 ./scripts/build-and-install.sh
 ```
@@ -58,6 +63,14 @@ VoiceInput is a macOS menu bar app that provides global voice-to-text input usin
 - After every build, explicitly tell the user the new version number (e.g., "版本 1.0.0.5 (build 5)")
 - Version is read from `Info.plist`: `CFBundleShortVersionString` + `CFBundleVersion`
 - Version is displayed in the menu bar menu (via `Config.appVersion`)
+
+**🔴 guest 侧的路径陷阱（客居架构下必读）：**
+只有 `/Users` 是 guest 与宿主的共享挂载。**`/Applications` 不是** —— 在 guest 里 `ls /Applications`
+看到的是 Linux VM 自己的目录，宿主装没装 app 完全看不出来。
+2026-08-01 发现 `build-and-install.sh` 因此长期误判：`[ ! -d "$DIST_APP_PATH" ]` 在 guest 恒为真，
+于是每次构建都打印"不存在，跳过 Distribution 版安装"，导致分发版从 2026-04-17 起 3 个半月没被更新过，
+而用户一直在用那个旧构建。现在该段所有文件操作（test/mkdir/cp）都经 `host_exec` 在宿主执行。
+判断宿主上的东西一律用 `host_exec`，别用 guest 本地的 test/ls。
 
 **安装路径稳定性：**
 两个版本各自的安装路径 MUST 保持稳定（个人版恒为 `~/Applications/VoiceInput Personal.app`，分发版恒为用户首次拖拽的位置），因为麦克风和 Accessibility 权限绑定到具体路径 + bundle ID。

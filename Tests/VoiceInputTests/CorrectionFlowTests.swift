@@ -128,12 +128,35 @@ final class CorrectionFlowTests: XCTestCase {
         XCTAssertEqual(delegate.currentRecordingMode, .refined)
     }
 
-    /// 双击降档窗口要足够短，不能长到把用户"说完一句就停"的正常操作误判成降档
-    func testDoubleTapWindowIsShortEnoughToNotSwallowRealStops() {
+    /// 降档窗口要足够短，不能长到把用户"说完一句就停"的正常操作误判成降档
+    @MainActor
+    func testFastModeWindowIsShortEnoughToNotSwallowRealStops() {
         _ = NSApplication.shared
         let delegate = AppDelegate()
-        XCTAssertLessThanOrEqual(delegate.doubleTapFastModeWindow, 0.6)
-        XCTAssertGreaterThanOrEqual(delegate.doubleTapFastModeWindow, 0.3)
+        let saved = Config.triggerActivation
+        defer { Config.triggerActivation = saved }
+
+        Config.triggerActivation = .singleTap
+        XCTAssertGreaterThanOrEqual(delegate.fastModeWindow, 0.3)
+        XCTAssertLessThanOrEqual(delegate.fastModeWindow, 0.6)
+    }
+
+    /// 双击触发时，用户要再完成一整个双击才算降档，需要更长的窗口。
+    /// 早期版本把降档限定在 singleTap，双击触发的用户完全用不上快速档。
+    @MainActor
+    func testFastModeWindowIsLongerWhenTriggerItselfIsADoubleTap() {
+        _ = NSApplication.shared
+        let delegate = AppDelegate()
+        let saved = Config.triggerActivation
+        defer { Config.triggerActivation = saved }
+
+        Config.triggerActivation = .singleTap
+        let single = delegate.fastModeWindow
+        Config.triggerActivation = .doubleTap
+        let double = delegate.fastModeWindow
+
+        XCTAssertGreaterThan(double, single, "双击触发时降档窗口必须更长")
+        XCTAssertLessThanOrEqual(double, 1.5, "再长就会把正常的短句停止误判成降档")
     }
 }
 

@@ -69,9 +69,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     var currentRecordingMode: RecordingMode = .refined
     /// 本次录音的开始时间，用于判定"第二击"是降档还是停止
     var recordingStartTime: CFAbsoluteTime = 0
-    /// 双击降档的判定窗口。录音刚开始这么短的时间内没人会真想停止，
-    /// 所以这个窗口内的第二次触发一定是双击的后半拍。
-    let doubleTapFastModeWindow: CFTimeInterval = 0.5
+    /// 降档判定窗口：录音刚开始这么短的时间内没人会真想停止（一个字还没说完），
+    /// 所以窗口内再次触发一定是"我要快速档"的意思。
+    ///
+    /// 窗口长度随触发方式变化：单击触发时用户只需再点一下；双击触发时用户要再完成
+    /// 一整个双击（两拍加间隔），需要更长的时间。
+    var fastModeWindow: CFTimeInterval {
+        Config.triggerActivation == .doubleTap ? 1.0 : 0.5
+    }
     /// 是否正在等待大模型修正结果（面板停留、尚未粘贴）
     var isCorrecting = false
     /// 放弃当前修正的闭包（ESC / 再次按触发键时调用）
@@ -880,12 +885,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             return
         }
 
-        // 双击降档：录音刚开始的窗口内再触发一次，视为"本次改用快速档"，不停止录音。
-        // 必须放在防抖之前 —— 双击的第二拍天然落在 300ms 防抖窗口里。
+        // 降档：录音刚开始的窗口内再触发一次，视为"本次改用快速档"，不停止录音。
+        // 必须放在防抖之前 —— 连续两次触发天然落在 300ms 防抖窗口里。
+        //
+        // 对单击触发和双击触发都成立：无论启动手势是什么，紧接着再做一次同样的手势
+        // 就是降档。早期版本这里限定了 singleTap，导致双击触发的用户完全用不上快速档。
         if isRecording,
            currentRecordingMode == .refined,
-           Config.triggerActivation == .singleTap,
-           now - recordingStartTime < doubleTapFastModeWindow {
+           now - recordingStartTime < fastModeWindow {
             currentRecordingMode = .fast
             lastToggleTime = now
             inputPanel?.showFastModeBadge()

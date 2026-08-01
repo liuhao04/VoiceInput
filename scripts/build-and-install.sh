@@ -1,34 +1,42 @@
 #!/usr/bin/env bash
-# build-and-install.sh — 构建并安装 Personal + Distribution 两个本地版本（默认同时装）
+# build-and-install.sh — 构建并安装 VoiceInput（默认只装 Distribution 版）
 #
-# 个人版与分发版完全隔离，默认同时更新：
-#   个人版 (Personal):
-#     - Bundle ID: com.voiceinput.mac.personal
-#     - App 名:    VoiceInput Personal.app
-#     - 安装位置:  ~/Applications/VoiceInput Personal.app
-#     - 菜单栏图标右上角带紫色圆点
-#   分发版 (Distribution，用于本地对照/公测):
+#   分发版 (Distribution) —— 唯一在维护的版本:
 #     - Bundle ID: com.voiceinput.mac
 #     - App 名:    VoiceInput.app
-#     - 安装位置:  /Applications/VoiceInput.app（必须已存在，通常由 DMG 首次装入）
+#     - 安装位置:  /Applications/VoiceInput.app（不存在时自动创建）
 #     - 原地替换 MacOS/Info.plist，保留 bundle 路径以保留 TCC 权限
 #
+#   个人版 (Personal) —— 2026-08-01 起停止维护/构建/使用:
+#     - Bundle ID: com.voiceinput.mac.personal
+#     - 安装位置:  ~/Applications/VoiceInput Personal.app
+#     - 与分发版功能完全相同，唯一差别是菜单栏的紫色角标
+#     - 仍可用 --personal / --personal-only 装，但日常不再需要
+#
 # 选项:
-#   --personal-only       仅装 Personal 版（跳过 Distribution）
-#   --distribution-only   仅装 Distribution 版（跳过 Personal）
+#   （无参数）            仅装 Distribution 版
+#   --personal-only       仅装 Personal 版
+#   --personal            额外也装 Personal 版
+#   --both                两个都装
 #
 # 正式分发 DMG（签名+公证）请用 ./scripts/build-dmg.sh
+# 注意：build-dmg.sh 目前仍是 host-only（用 /tmp 暂存，guest 侧宿主看不见）
 
 set -e
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-INSTALL_PERSONAL=true
+# 默认只装 Distribution（2026-08-01 起）：Personal 版已停止维护/构建/使用。
+# 两个版本从同一份代码构建、功能完全相同，唯一差别是菜单栏的紫色角标，
+# 日常同时装两个没有收益。要恢复装 Personal 用 --personal 或 --personal-only。
+INSTALL_PERSONAL=false
 INSTALL_DISTRIBUTION=true
 for arg in "$@"; do
     case "$arg" in
-        --personal-only)      INSTALL_DISTRIBUTION=false ;;
-        --distribution-only)  INSTALL_PERSONAL=false ;;
+        --personal-only)      INSTALL_PERSONAL=true;  INSTALL_DISTRIBUTION=false ;;
+        --personal)           INSTALL_PERSONAL=true ;;
+        --distribution-only)  INSTALL_PERSONAL=false; INSTALL_DISTRIBUTION=true ;;
+        --both)               INSTALL_PERSONAL=true;  INSTALL_DISTRIBUTION=true ;;
     esac
 done
 
@@ -161,34 +169,41 @@ fi
 if [ "$INSTALL_DISTRIBUTION" = true ]; then
     echo ""
     echo "=== Distribution 版 ==="
-    if [ ! -d "$DIST_APP_PATH" ]; then
-        echo "⚠️  $DIST_APP_PATH 不存在 — 跳过 Distribution 版安装。"
-        echo "    首次安装请通过 ./scripts/build-dmg.sh 产 DMG 后拖进 /Applications。"
-    else
-        echo "In-place updating $DIST_APP_PATH..."
-
-        # 若正在运行则先停掉
-        DIST_PID=$(host_exec pgrep -f "$DIST_APP_PATH/Contents/MacOS/VoiceInput" || true)
-        if [ -n "$DIST_PID" ]; then
-            echo "Stopping running Distribution version (pid $DIST_PID)..."
-            host_exec kill "$DIST_PID" || true
-            sleep 1
-        fi
-
-        # 只替换可执行文件和 Info.plist（保留 bundle 路径以保留 TCC 权限）
-        cp "$PROJECT_DIR/.build/release/VoiceInput" "$DIST_APP_PATH/Contents/MacOS/VoiceInput"
-        cp "$PROJECT_DIR/Info.plist" "$DIST_APP_PATH/Contents/Info.plist"
-        plistbuddy -c "Set :CFBundleIdentifier com.voiceinput.mac" "$DIST_APP_PATH/Contents/Info.plist"
-        plistbuddy -c "Set :CFBundleName VoiceInput" "$DIST_APP_PATH/Contents/Info.plist"
-
-        if [ -f "$PROJECT_DIR/Assets/AppIcon.icns" ]; then
-            cp "$PROJECT_DIR/Assets/AppIcon.icns" "$DIST_APP_PATH/Contents/Resources/"
-        fi
-
-        sign_bundle "$DIST_APP_PATH"
-        echo "Updated $DIST_APP_PATH"
-
-        echo "Launching VoiceInput..."
-        open "$DIST_APP_PATH"
+    # 注意：/Applications 不在 guest 与宿主的共享挂载上（只有 /Users 是），
+    # 所以这一段所有落到 $DIST_APP_PATH 的文件操作都必须经 host_exec 在宿主执行。
+    # Personal 版装在 ~/Applications（即 /Users/... 下），guest 本地操作即可，两者不同。
+    if ! host_exec test -d "$DIST_APP_PATH"; then
+        # 首次安装：就地建出 bundle。之后每次构建都只替换里面的可执行文件和 Info.plist，
+        # 路径和 bundle ID 从此不变，TCC 权限只需授权一次。
+        # 要产给别人装的公证 DMG 仍然用 ./scripts/build-dmg.sh。
+        echo "$DIST_APP_PATH 不存在，首次创建 bundle..."
+        host_exec mkdir -p "$DIST_APP_PATH/Contents/MacOS"
+        host_exec mkdir -p "$DIST_APP_PATH/Contents/Resources"
     fi
+
+    echo "In-place updating $DIST_APP_PATH..."
+
+    # 若正在运行则先停掉
+    DIST_PID=$(host_exec pgrep -f "$DIST_APP_PATH/Contents/MacOS/VoiceInput" || true)
+    if [ -n "$DIST_PID" ]; then
+        echo "Stopping running Distribution version (pid $DIST_PID)..."
+        host_exec kill "$DIST_PID" || true
+        sleep 1
+    fi
+
+    # 只替换可执行文件和 Info.plist（保留 bundle 路径以保留 TCC 权限）
+    host_exec cp "$PROJECT_DIR/.build/release/VoiceInput" "$DIST_APP_PATH/Contents/MacOS/VoiceInput"
+    host_exec cp "$PROJECT_DIR/Info.plist" "$DIST_APP_PATH/Contents/Info.plist"
+    plistbuddy -c "Set :CFBundleIdentifier com.voiceinput.mac" "$DIST_APP_PATH/Contents/Info.plist"
+    plistbuddy -c "Set :CFBundleName VoiceInput" "$DIST_APP_PATH/Contents/Info.plist"
+
+    if [ -f "$PROJECT_DIR/Assets/AppIcon.icns" ]; then
+        host_exec cp "$PROJECT_DIR/Assets/AppIcon.icns" "$DIST_APP_PATH/Contents/Resources/"
+    fi
+
+    sign_bundle "$DIST_APP_PATH"
+    echo "Updated $DIST_APP_PATH"
+
+    echo "Launching VoiceInput..."
+    open "$DIST_APP_PATH"
 fi
