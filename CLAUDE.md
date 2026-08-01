@@ -169,8 +169,19 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 存 UserDefaults；API Key 走 `CredentialsStore`（`glmApiKey`），可被环境变量 `GLM_API_KEY` 覆盖。
 设置界面第 4 个 Tab。
 
-**上下文**：`AppDelegate.recentContext` 是内存里的环形缓冲（最近 5 条实际采纳的文本）。
-刻意不读历史文件——历史默认存 iCloud，同步阻塞会拖慢粘贴这条关键路径。
+**上下文**：最近 5 条**实际采纳**的文本，持久化在 `Config.recentContextEntries`（UserDefaults），
+带时间戳，超过 `TextCorrector.contextMaxAge`（2 小时）的条目自动失效，连续重复不重记。
+存的永远是最终版本，优先级天然是**用户手改 > 模型修正 > ASR 原文**，因为写入点
+（`insertFinalText` / `handleEditingFinished` / `handleEditingCancelled`）都在文本被采用之后。
+刻意不读识别历史文件——历史默认存 iCloud，同步阻塞会拖慢粘贴这条关键路径。
+
+**上下文只治"重复出现"，治不了"第一次"**（2026-08-01 实测）：
+- 通用技术术语（`无头克罗姆` → `无头 Chrome`）模型自带知识，**无上文也能修对**
+- 私有专名（`田轨号劫` → `《天轨浩劫》`）**无上文必错**，而且失败方式是模型
+  **自信地编一个** `《铁轨号劫》`。prompt 里的"拿不准就保持原样"挡不住这种看起来合理的猜测。
+  有上文才修对。
+→ 所以私有专名的正解是**先声明**（产品方案第二步的专名词典 + 火山热词表），
+  不是等它偶然蒙对一次再靠上下文维持。上下文是巩固机制，不是冷启动机制。
 
 ## Development Workflow Guidelines
 

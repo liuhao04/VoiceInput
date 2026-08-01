@@ -83,9 +83,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     /// 放弃当前修正的闭包（ESC / 再次按触发键时调用）
     var abortCorrection: (() -> Void)?
     /// 最近几次实际采纳的输入，作为修正的上下文。
-    /// 存内存不读历史文件：历史默认在 iCloud，同步阻塞会拖慢粘贴这条关键路径。
-    /// 采纳的文本已经是"用户手改 > 修正后 > ASR 原文"的最终结果，正是上下文该用的版本。
-    var recentContext: [String] = []
+    /// 采纳的文本已经是"用户手改 > 模型修正 > ASR 原文"的最终结果，正是上下文该用的版本。
+    /// 持久化在 UserDefaults（见 Config.recentContextEntries），重启后仍在；
+    /// 刻意不读识别历史文件，历史默认在 iCloud，同步阻塞会拖慢粘贴这条关键路径。
+    var recentContext: [String] {
+        TextCorrector.freshContext(Config.recentContextEntries).map { $0.text }
+    }
 
     // MARK: - 全局快捷键
     private var hotkeyTap: CFMachPort?
@@ -1255,10 +1258,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     func rememberContext(_ text: String) {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
-        recentContext.append(trimmed)
-        if recentContext.count > TextCorrector.contextLimit {
-            recentContext.removeFirst(recentContext.count - TextCorrector.contextLimit)
+
+        var entries = TextCorrector.freshContext(Config.recentContextEntries)
+        // 连着说同一句时不重复记：5 条里塞 5 份一样的内容会把信号稀释掉
+        if entries.last?.text == trimmed { return }
+
+        entries.append(ContextEntry(time: Date(), text: trimmed))
+        if entries.count > TextCorrector.contextLimit {
+            entries.removeFirst(entries.count - TextCorrector.contextLimit)
         }
+        Config.recentContextEntries = entries
     }
 
     /// 流式 ASR 每次回调的是当前完整结果（递增），用最新结果替换而非追加

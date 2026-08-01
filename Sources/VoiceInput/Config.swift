@@ -138,6 +138,7 @@ enum Config {
     private static let correctionQualityKey = "correctionQuality"
     private static let correctionTimeoutKey = "correctionTimeout"
     private static let glmApiKeyKey = "glmApiKey"
+    private static let recentContextKey = "recentContext"
 
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
@@ -438,6 +439,23 @@ enum Config {
         set {
             switch correctionService {
             case .glm: glmApiKey = newValue
+            }
+        }
+    }
+
+    /// 修正用的上下文（最近采纳的输入）。持久化到 UserDefaults 而不是内存，
+    /// 否则每次重启 app 后的前几句都是没有上下文的裸修正。
+    ///
+    /// 刻意不用识别历史文件：历史默认存 iCloud，读它会把同步阻塞引到粘贴这条关键路径上。
+    /// 这里只有 5 条短文本，放 UserDefaults 足够。
+    static var recentContextEntries: [ContextEntry] {
+        get {
+            guard let data = UserDefaults.standard.data(forKey: recentContextKey) else { return [] }
+            return (try? JSONDecoder().decode([ContextEntry].self, from: data)) ?? []
+        }
+        set {
+            if let data = try? JSONEncoder().encode(newValue) {
+                UserDefaults.standard.set(data, forKey: recentContextKey)
             }
         }
     }

@@ -83,9 +83,14 @@ final class CorrectionFlowTests: XCTestCase {
 
     // MARK: - 上下文环形缓冲
 
+    private func clearContext() {
+        Config.recentContextEntries = []
+    }
+
     @MainActor
     func testRecentContextKeepsOnlyTheLatestEntries() {
         _ = NSApplication.shared
+        clearContext()
         let delegate = AppDelegate()
 
         for i in 1...(TextCorrector.contextLimit + 3) {
@@ -100,6 +105,7 @@ final class CorrectionFlowTests: XCTestCase {
     @MainActor
     func testRecentContextIgnoresBlankText() {
         _ = NSApplication.shared
+        clearContext()
         let delegate = AppDelegate()
 
         delegate.rememberContext("   ")
@@ -112,11 +118,78 @@ final class CorrectionFlowTests: XCTestCase {
     @MainActor
     func testRecentContextTrimsStoredText() {
         _ = NSApplication.shared
+        clearContext()
         let delegate = AppDelegate()
 
         delegate.rememberContext("  帮我打开 Claude \n")
 
         XCTAssertEqual(delegate.recentContext, ["帮我打开 Claude"])
+    }
+
+    /// 连着说同一句时不该记多份，否则 5 条里全是重复内容，把信号稀释掉
+    @MainActor
+    func testRecentContextSkipsConsecutiveDuplicates() {
+        _ = NSApplication.shared
+        clearContext()
+        let delegate = AppDelegate()
+
+        delegate.rememberContext("无头 chrome")
+        delegate.rememberContext("无头 chrome")
+        delegate.rememberContext("无头 chrome")
+
+        XCTAssertEqual(delegate.recentContext, ["无头 chrome"])
+    }
+
+    @MainActor
+    func testRecentContextAllowsRepeatAfterSomethingElse() {
+        _ = NSApplication.shared
+        clearContext()
+        let delegate = AppDelegate()
+
+        delegate.rememberContext("无头 chrome")
+        delegate.rememberContext("天轨浩劫")
+        delegate.rememberContext("无头 chrome")
+
+        XCTAssertEqual(delegate.recentContext, ["无头 chrome", "天轨浩劫", "无头 chrome"])
+    }
+
+    /// 上下文要跨 app 重启存活，否则每次重启后的前几句都是没有上下文的裸修正
+    @MainActor
+    func testRecentContextSurvivesAcrossInstances() {
+        _ = NSApplication.shared
+        clearContext()
+
+        let first = AppDelegate()
+        first.rememberContext("我在调无头 chrome 的截图")
+
+        let second = AppDelegate()
+        XCTAssertEqual(second.recentContext, ["我在调无头 chrome 的截图"])
+    }
+
+    // MARK: - 上下文时效
+
+    func testFreshContextDropsStaleEntries() {
+        let now = Date()
+        let entries = [
+            ContextEntry(time: now.addingTimeInterval(-TextCorrector.contextMaxAge - 60), text: "很久以前说的"),
+            ContextEntry(time: now.addingTimeInterval(-60), text: "刚刚说的"),
+        ]
+        let fresh = TextCorrector.freshContext(entries, now: now)
+        XCTAssertEqual(fresh.map { $0.text }, ["刚刚说的"])
+    }
+
+    func testFreshContextKeepsEntriesInsideTheWindow() {
+        let now = Date()
+        let entries = [
+            ContextEntry(time: now.addingTimeInterval(-TextCorrector.contextMaxAge + 60), text: "窗口内"),
+        ]
+        XCTAssertEqual(TextCorrector.freshContext(entries, now: now).count, 1)
+    }
+
+    /// 窗口太短会让上下文长期为空，等于没这个功能；太长会把昨天的话题带进来
+    func testContextMaxAgeIsHoursNotMinutes() {
+        XCTAssertGreaterThanOrEqual(TextCorrector.contextMaxAge, 30 * 60)
+        XCTAssertLessThanOrEqual(TextCorrector.contextMaxAge, 12 * 60 * 60)
     }
 
     // MARK: - 录音档位

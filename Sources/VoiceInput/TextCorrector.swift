@@ -66,6 +66,13 @@ extension CorrectionService {
     }
 }
 
+/// 一条上下文：实际被采纳的文本 + 采纳时间。
+/// 存的永远是最终版本（用户手改 > 模型修正 > ASR 原文），因为写入发生在文本被采用之后。
+struct ContextEntry: Codable, Equatable {
+    let time: Date
+    let text: String
+}
+
 enum CorrectionError: Error, Equatable {
     /// 未启用或缺少 API Key
     case notConfigured
@@ -112,6 +119,17 @@ final class TextCorrector {
 
     /// 送入上下文的最近输入条数
     static let contextLimit = 5
+
+    /// 上下文的最大保鲜期。超过这个时间的旧输入大概率已经换了话题，
+    /// 留着只会误导模型。选 2 小时而不是几分钟：口述工作往往一个话题连续几小时，
+    /// 窗口太短会让上下文长期为空，等于没有这个功能。
+    static let contextMaxAge: TimeInterval = 2 * 60 * 60
+
+    /// 过滤掉过期条目，并只保留最近 contextLimit 条。纯函数，可单测。
+    static func freshContext(_ entries: [ContextEntry], now: Date = Date()) -> [ContextEntry] {
+        let alive = entries.filter { now.timeIntervalSince($0.time) <= contextMaxAge }
+        return Array(alive.suffix(contextLimit))
+    }
 
     private let session: URLSession
 
