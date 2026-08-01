@@ -26,13 +26,13 @@ app 仍留在 `~/Applications/VoiceInput Personal.app`（未删除），但不�
 |---|---|---|
 | Bundle ID | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
 | 安装路径 | `~/Applications/VoiceInput Personal.app` | `/Applications/VoiceInput.app`（用户拖拽或本机原地更新） |
-| 构建脚本 | `./scripts/build-and-install.sh`（默认同时装 Distribution） | `./scripts/build-dmg.sh`（产公证 DMG） |
+| 构建脚本 | `./scripts/build-and-install.sh --personal` | `./scripts/build-and-install.sh`（默认）/ `build-dmg.sh` 产公证 DMG |
 | 菜单栏图标 | mic.fill + 紫色角标 | mic.fill（template，自适配明暗模式） |
 | Keychain service | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
 | UserDefaults domain | `com.voiceinput.mac.personal` | `com.voiceinput.mac` |
 | Log file | `~/Library/Logs/VoiceInput Personal.log` | `~/Library/Logs/VoiceInput.log` |
 | TCC 权限 | 独立授权 | 独立授权 |
-| 用途 | 日常自用 | 发给朋友/公测 + 本机并排对照 |
+| 用途 | ~~日常自用~~（已停用） | 日常自用 + 发给朋友/公测 |
 
 两个版本可以同时安装、同时运行，互不干扰。
 
@@ -42,9 +42,9 @@ app 仍留在 `~/Applications/VoiceInput Personal.app`（未删除），但不�
 ```
 1. 自动递增 `CFBundleVersion`
 2. 构建一次 release
-3. **Personal 版**：复制到 `~/Applications/VoiceInput Personal.app`、PlistBuddy 改 Bundle ID/显示名、Developer ID 签名、按路径 kill+open
-4. **Distribution 版**：若 `/Applications/VoiceInput.app` 已存在，原地替换 `Contents/MacOS/VoiceInput` 和 `Contents/Info.plist`（保留 bundle 路径以保留 TCC 权限）、PlistBuddy 写回 `com.voiceinput.mac` + `VoiceInput`、同一证书签名、按路径 kill+open；若不存在则跳过并提示先用 `build-dmg.sh`
-5. 两个版本可选 flag：`--personal-only` / `--distribution-only` 只装其中一个
+3. **Distribution 版**（默认且唯一）：原地替换 `Contents/MacOS/VoiceInput` 和 `Contents/Info.plist`（保留 bundle 路径以保留 TCC 权限）、PlistBuddy 写回 `com.voiceinput.mac` + `VoiceInput`、Developer ID 签名、按路径 kill+open。bundle 不存在时自动创建
+4. **Personal 版**（需显式 `--personal` / `--personal-only`）：复制到 `~/Applications/VoiceInput Personal.app`、改 Bundle ID/显示名、同一证书签名、kill+open
+5. Flag：`--personal-only` / `--distribution-only` / `--personal`（两个都装）/ `--both`
 
 **Distribution 版正式分发（要公证时跑）：**
 ```bash
@@ -123,11 +123,15 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 
 **两档模式**
 - 单击触发键 = **精修档**：ASR → 替换规则 → 大模型修正 → 粘贴
-- 开始录音后 0.5 秒内再点一次 = 本次**降为快速档**：直接粘贴，不修正
+- 录音刚开始的窗口内**再做一次同样的触发手势** = 本次**降为快速档**：直接粘贴，不修正
 
-降档判定放在 `toggleRecording()` 的 300ms 防抖**之前**（双击的第二拍天然落在防抖窗口里）。
-之所以用"录音开始后的短窗口"而不是延迟启动来区分单双击，是因为档位只在停止录音时才起作用，
-第二拍可以在录音已开始后到达，这样启动和停止都是零额外延迟。
+降档判定放在 `toggleRecording()` 的 300ms 防抖**之前**（连续两次触发天然落在防抖窗口里）。
+之所以用"录音开始后的短窗口"而不是延迟启动来区分，是因为档位只在停止录音时才起作用，
+第二次触发可以在录音已开始后到达，这样启动和停止都是零额外延迟。
+
+窗口长度看触发方式：单击触发 0.5s，双击触发 1.0s（用户要再完成一整个双击，需要更久）。
+**不要把降档限定成只在 singleTap 下生效** —— 曾经这么写过，结果用双击触发的用户
+（`triggerActivation = doubleTap`）完全用不上快速档，且没有任何提示。
 
 **不可违反的约束**
 - **先修正再粘贴**。绝不改写已经贴出去的文本（要模拟选中+删除+重粘，失败会破坏用户文档）
