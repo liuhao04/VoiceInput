@@ -98,12 +98,77 @@ final class TextCorrectorTests: XCTestCase {
     }
 
     func testUserPromptKeepsOnlyTheMostRecentContextEntries() {
-        let context = (1...12).map { "第\($0)条" }
+        let total = TextCorrector.contextLimit + 5
+        let context = (1...total).map { "第\($0)条内容" }
         let prompt = TextCorrector.buildUserPrompt(text: "测试", context: context)
-        XCTAssertTrue(prompt.contains("第12条"))
-        XCTAssertTrue(prompt.contains("第8条"))
-        XCTAssertFalse(prompt.contains("第7条"), "只应保留最近 \(TextCorrector.contextLimit) 条")
-        XCTAssertFalse(prompt.contains("第1条"))
+
+        XCTAssertTrue(prompt.contains("第\(total)条内容"), "最新一条必须在")
+        XCTAssertTrue(prompt.contains("第\(total - TextCorrector.contextLimit + 1)条内容"), "窗口内最旧一条必须在")
+        XCTAssertFalse(
+            prompt.contains("第\(total - TextCorrector.contextLimit)条内容"),
+            "只应保留最近 \(TextCorrector.contextLimit) 条"
+        )
+        XCTAssertFalse(prompt.contains("第1条内容"))
+    }
+
+    // MARK: - 专名词典
+
+    func testUserPromptOmitsDictionaryBlockWhenEmpty() {
+        let prompt = TextCorrector.buildUserPrompt(text: "测试", context: [], properNouns: [])
+        XCTAssertFalse(prompt.contains("<专名词典>"))
+    }
+
+    func testUserPromptIncludesProperNouns() {
+        let prompt = TextCorrector.buildUserPrompt(
+            text: "田轨号劫又打了两把",
+            context: [],
+            properNouns: ["天轨浩劫", "无头 chrome"]
+        )
+        XCTAssertTrue(prompt.contains("<专名词典>"))
+        XCTAssertTrue(prompt.contains("天轨浩劫"))
+        XCTAssertTrue(prompt.contains("无头 chrome"))
+    }
+
+    /// 词典只给词、不给映射。给映射等于把替换规则"无法做语境判断"的机械缺陷
+    /// 传染给模型，反而抹掉它本来具备的判断力。
+    func testDictionaryBlockTellsModelNotToForceTheWordsIn() {
+        let prompt = TextCorrector.buildUserPrompt(text: "测试", context: [], properNouns: ["天轨浩劫"])
+        XCTAssertTrue(prompt.contains("不要为了用上它们而改变原意"))
+        XCTAssertTrue(prompt.contains("未必出现在本次文本中"))
+    }
+
+    func testDictionaryComesBeforeContextAndTarget() {
+        let prompt = TextCorrector.buildUserPrompt(
+            text: "待修文本",
+            context: ["最近说的话"],
+            properNouns: ["天轨浩劫"]
+        )
+        let dict = prompt.range(of: "<专名词典>")!
+        let ctx = prompt.range(of: "<最近输入>")!
+        let target = prompt.range(of: "<待修正>")!
+        XCTAssertTrue(dict.lowerBound < ctx.lowerBound)
+        XCTAssertTrue(ctx.lowerBound < target.lowerBound)
+    }
+
+    func testDictionaryDropsBlankEntries() {
+        let prompt = TextCorrector.buildUserPrompt(text: "测试", context: [], properNouns: ["  ", "\n"])
+        XCTAssertFalse(prompt.contains("<专名词典>"))
+    }
+
+    func testRequestBodyCarriesProperNouns() {
+        let body = TextCorrector.buildRequestBody(
+            model: "glm-5.2", text: "测试", context: [], properNouns: ["天轨浩劫"]
+        )
+        let messages = body["messages"] as? [[String: String]]
+        XCTAssertTrue(messages?[1]["content"]?.contains("天轨浩劫") == true)
+    }
+
+    // MARK: - 上下文条数
+
+    /// 用户 2026-08-02 明确要求提到 30 条：覆盖面比 5 条宽得多，
+    /// 成本和延迟对 GLM 都可忽略。
+    func testContextLimitIsThirty() {
+        XCTAssertEqual(TextCorrector.contextLimit, 30)
     }
 
     // MARK: - 请求体

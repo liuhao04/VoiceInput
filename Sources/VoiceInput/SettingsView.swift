@@ -121,6 +121,12 @@ struct SettingsView: View {
     @State private var correctionStatusIsError: Bool = false
     @State private var correctionTesting: Bool = false
 
+    @State private var properNouns: [String] = Config.properNouns
+    @State private var newProperNoun: String = ""
+    @State private var selectedProperNoun: String? = nil
+    @State private var properNounError: String? = nil
+    @State private var showForcedReplace: Bool = false
+
     @State private var replaceRulesFilePath: String = Config.replaceRulesFilePath
     @State private var replaceRules: [ReplaceRule] = TextReplacer.shared.rules
     @State private var selectedRuleIndex: Int? = nil
@@ -151,7 +157,7 @@ struct SettingsView: View {
                 .tabItem { Label("语音识别", systemImage: "mic") }
                 .tag(1)
             replaceTab
-                .tabItem { Label("词语替换", systemImage: "arrow.left.arrow.right") }
+                .tabItem { Label("专名词典", systemImage: "character.book.closed") }
                 .tag(2)
             correctionTab
                 .tabItem { Label("AI 修正", systemImage: "wand.and.stars") }
@@ -385,11 +391,104 @@ struct SettingsView: View {
         .padding(24)
     }
 
-    // MARK: - Tab 3: 词语替换
+    // MARK: - Tab 3: 专名词典（含折叠起来的强制替换）
 
     private var replaceTab: some View {
         VStack(alignment: .leading, spacing: 12) {
-            sectionHeader("词语替换（识别结果自动替换）")
+            properNounSection
+
+            Divider()
+
+            DisclosureGroup(isExpanded: $showForcedReplace) {
+                forcedReplaceSection
+                    .padding(.top, 8)
+            } label: {
+                Text("高级：强制替换")
+                    .font(.system(size: 13, weight: .bold))
+            }
+        }
+        .padding(24)
+    }
+
+    /// 专名词典：只列词、不列映射。
+    /// 词典告诉模型"这些词存在于这个人的世界里"，由模型按语境判断该不该用；
+    /// 下面的强制替换是无条件的，源词在别的语境也合法时会误伤。
+    private var properNounSection: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            sectionHeader("专名词典")
+
+            Text("你自己的专有名词，比如项目名、人名、作品名、专用术语。AI 修正时会连同最近 \(TextCorrector.contextLimit) 条输入一起交给模型，\n模型按语境判断该不该用，不会强行替换。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            HStack(spacing: 8) {
+                TextField("输入一个专有名词后回车添加", text: $newProperNoun)
+                    .textFieldStyle(.roundedBorder)
+                    .onSubmit { addProperNoun() }
+                Button("添加") { addProperNoun() }
+                    .controlSize(.small)
+                    .disabled(newProperNoun.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+
+            if let err = properNounError {
+                Text(err).font(.caption).foregroundColor(.red)
+            }
+
+            List(selection: $selectedProperNoun) {
+                ForEach(properNouns, id: \.self) { noun in
+                    Text(noun)
+                        .font(.system(size: 12))
+                        .tag(noun)
+                }
+            }
+            .listStyle(.plain)
+            .frame(minHeight: 160)
+            .border(Color(nsColor: .separatorColor), width: 0.5)
+
+            HStack(spacing: 8) {
+                Button("删除") { deleteSelectedProperNoun() }
+                    .controlSize(.small)
+                    .disabled(selectedProperNoun == nil)
+                Spacer()
+                Text("\(properNouns.count) 个")
+                    .font(.caption)
+                    .foregroundColor(.secondary)
+            }
+        }
+    }
+
+    private func addProperNoun() {
+        let word = newProperNoun.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !word.isEmpty else { return }
+        guard !properNouns.contains(word) else {
+            properNounError = "「\(word)」已经在词典里了"
+            return
+        }
+        properNounError = nil
+        var updated = properNouns
+        updated.append(word)
+        Config.properNouns = updated
+        properNouns = Config.properNouns
+        newProperNoun = ""
+        Log.log("[Settings] 专名词典添加「\(word)」，现有 \(properNouns.count) 个")
+    }
+
+    private func deleteSelectedProperNoun() {
+        guard let word = selectedProperNoun else { return }
+        Config.properNouns = properNouns.filter { $0 != word }
+        properNouns = Config.properNouns
+        selectedProperNoun = nil
+        properNounError = nil
+        Log.log("[Settings] 专名词典删除「\(word)」，现有 \(properNouns.count) 个")
+    }
+
+    private var forcedReplaceSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("对识别结果做无条件的字符串替换，在 AI 修正之前执行。\n⚠️ 源词在别的语境里也合法时会误伤（比如 cloud→claude 会把你真想说的 cloud 也改掉）。\n能交给专名词典的就别写在这里。")
+                .font(.caption)
+                .foregroundColor(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             // 文件路径行
             HStack(spacing: 8) {
@@ -521,7 +620,6 @@ struct SettingsView: View {
                 }
             }
         }
-        .padding(24)
     }
 
     // MARK: - Subviews

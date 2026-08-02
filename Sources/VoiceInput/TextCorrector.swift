@@ -117,8 +117,9 @@ enum CorrectionError: Error, Equatable {
 final class TextCorrector {
     static let shared = TextCorrector()
 
-    /// 送入上下文的最近输入条数
-    static let contextLimit = 5
+    /// 送入上下文的最近输入条数。
+    /// 30 条约 1~2k token，对 GLM 的成本和延迟都可忽略，换来的是明显更宽的专名覆盖面。
+    static let contextLimit = 30
 
     /// 上下文的最大保鲜期。超过这个时间的旧输入大概率已经换了话题，
     /// 留着只会误导模型。选 2 小时而不是几分钟：口述工作往往一个话题连续几小时，
@@ -162,10 +163,26 @@ final class TextCorrector {
     直接输出修正后的文本本身。不要任何前言、说明、引号包裹或代码块包裹。
     """
 
-    /// 构建用户消息。上下文用明确的分隔标记与待修正文本隔开，
-    /// 避免模型把上下文也当成需要修正的内容。
-    static func buildUserPrompt(text: String, context: [String]) -> String {
+    /// 构建用户消息。三块用明确的分隔标记隔开，避免模型把参考资料当成需要修正的内容。
+    ///
+    /// 专名词典**只给词、不给映射**。给映射（"把 cloud 改成 claude"）等于把替换规则
+    /// 无法做语境判断的机械缺陷传染给模型，反而抹掉它本来具备的判断力。
+    static func buildUserPrompt(text: String, context: [String], properNouns: [String] = []) -> String {
         var parts: [String] = []
+
+        let nouns = properNouns
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        if !nouns.isEmpty {
+            parts.append("""
+            以下是该用户声明的专有名词。本次文本里出现读音相近但写错的地方，按这里的写法改。
+            注意：词表里的词未必出现在本次文本中，**不要为了用上它们而改变原意**。
+            <专名词典>
+            \(nouns.joined(separator: "\n"))
+            </专名词典>
+            """)
+        }
+
         let usable = context
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -178,6 +195,7 @@ final class TextCorrector {
             </最近输入>
             """)
         }
+
         parts.append("""
         请修正下面这段文本，只输出修正后的结果：
         <待修正>
@@ -195,7 +213,8 @@ final class TextCorrector {
     static func buildRequestBody(
         model: String,
         text: String,
-        context: [String]
+        context: [String],
+        properNouns: [String] = []
     ) -> [String: Any] {
         // 中文大致 1 字 ≈ 1~2 token，留 3 倍余量，并给一个下限和上限
         let budget = min(4096, max(512, text.count * 3))
@@ -203,7 +222,7 @@ final class TextCorrector {
             "model": model,
             "messages": [
                 ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": buildUserPrompt(text: text, context: context)],
+                ["role": "user", "content": buildUserPrompt(text: text, context: context, properNouns: properNouns)],
             ],
             "thinking": ["type": "disabled"],
             "temperature": 0.2,
@@ -318,6 +337,7 @@ final class TextCorrector {
     func correct(
         text: String,
         context: [String],
+        properNouns: [String] = [],
         completion: @escaping (Result<String, CorrectionError>) -> Void
     ) -> () -> Void {
         guard Self.isReady else {
@@ -340,7 +360,7 @@ final class TextCorrector {
         request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let body = Self.buildRequestBody(model: model, text: text, context: context)
+        let body = Self.buildRequestBody(model: model, text: text, context: context, properNouns: properNouns)
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
             DispatchQueue.main.async { completion(.failure(.malformed)) }
             return {}
@@ -399,7 +419,7 @@ final class TextCorrector {
             finish(.failure(.timedOut))
         }
 
-        Log.log("[Correct] 发起修正 service=\(service.rawValue) model=\(model) 原文\(text.count)字 上下文\(min(context.count, Self.contextLimit))条 预算\(timeout)s")
+        Log.log("[Correct] 发起修正 service=\(service.rawValue) model=\(model) 原文\(text.count)字 上下文\(min(context.count, Self.contextLimit))条 专名\(properNouns.count)个 预算\(timeout)s")
         task.resume()
 
         return { [weak task] in

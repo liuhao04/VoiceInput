@@ -169,8 +169,22 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 存 UserDefaults；API Key 走 `CredentialsStore`（`glmApiKey`），可被环境变量 `GLM_API_KEY` 覆盖。
 设置界面第 4 个 Tab。
 
-**上下文**：最近 5 条**实际采纳**的文本，持久化在 `Config.recentContextEntries`（UserDefaults），
+**专名词典**（`Config.properNouns`，UserDefaults）：用户自己声明的专有名词，**只有词、没有映射**。
+与替换规则的区别是本质的：替换规则 `cloud → claude` 是无条件强制指令，用户日常也说 cloud 时就误伤；
+词典只告诉模型"这些词存在于这个人的世界里"，由模型按语境判断该不该用。规则做不了语境判断，模型能。
+**绝不能把替换规则的映射关系送进 prompt** —— 那等于把规则的机械缺陷传染给模型，自废武功。
+
+实测（2026-08-02，`田轨号劫` → 期望 `天轨浩劫`）：
+- 无词典无上文 → 模型**自信编造** `《铁轨号劫》`
+- **只给词典（无上文）→ 修对**。所以词典解决冷启动，上下文只解决重复出现
+- 词典在但本次文本与它无关 → 不会硬套（prompt 里明确写了"未必出现在本次文本中"）
+
+设置界面第 3 个 Tab「专名词典」，替换规则降级为其中折叠的「高级：强制替换」并附误伤提示。
+待做：同步到火山热词表（从识别源头干预），需先确认火山接口支持按 ID 读写热词内容。
+
+**上下文**：最近 30 条**实际采纳**的文本，持久化在 `Config.recentContextEntries`（UserDefaults），
 带时间戳，超过 `TextCorrector.contextMaxAge`（2 小时）的条目自动失效，连续重复不重记。
+30 条约 1~2k prompt token，实测没有带来稳定的延迟增长（同规模两次请求 2.0s / 1.2s，差异是服务端抖动）。
 存的永远是最终版本，优先级天然是**用户手改 > 模型修正 > ASR 原文**，因为写入点
 （`insertFinalText` / `handleEditingFinished` / `handleEditingCancelled`）都在文本被采用之后。
 刻意不读识别历史文件——历史默认存 iCloud，同步阻塞会拖慢粘贴这条关键路径。

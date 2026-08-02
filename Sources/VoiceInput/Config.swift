@@ -139,6 +139,7 @@ enum Config {
     private static let correctionTimeoutKey = "correctionTimeout"
     private static let glmApiKeyKey = "glmApiKey"
     private static let recentContextKey = "recentContext"
+    private static let properNounsKey = "properNouns"
 
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
@@ -440,6 +441,24 @@ enum Config {
             switch correctionService {
             case .glm: glmApiKey = newValue
             }
+        }
+    }
+
+    /// 专名词典：用户自己声明的专有名词，**只有词、没有映射**。
+    ///
+    /// 与替换规则的区别是本质的：替换规则 `cloud → claude` 是无条件强制指令，
+    /// 用户日常也会说 cloud 时就会误伤；词典只告诉模型"这些词存在于这个人的世界里"，
+    /// 由模型按语境自己判断这一句该不该用。规则做不了语境判断，模型能。
+    ///
+    /// 用途一：送进修正 prompt。用途二（待做）：同步到火山热词表，从识别源头干预。
+    static var properNouns: [String] {
+        get { UserDefaults.standard.stringArray(forKey: properNounsKey) ?? [] }
+        set {
+            var seen = Set<String>()
+            let cleaned = newValue
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty && seen.insert($0).inserted }
+            UserDefaults.standard.set(cleaned, forKey: properNounsKey)
         }
     }
 

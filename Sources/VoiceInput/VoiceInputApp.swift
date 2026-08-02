@@ -1207,7 +1207,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         inputPanel?.showCorrectingState()
         isCorrecting = true
 
-        let cancel = TextCorrector.shared.correct(text: original, context: recentContext) { [weak self] result in
+        let cancel = TextCorrector.shared.correct(
+            text: original,
+            context: recentContext,
+            properNouns: Config.properNouns
+        ) { [weak self] result in
             guard let self = self, self.isCorrecting else { return }
             self.isCorrecting = false
             self.abortCorrection = nil
