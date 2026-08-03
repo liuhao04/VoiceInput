@@ -121,10 +121,13 @@ final class TextCorrector {
     /// 30 条约 1~2k token，对 GLM 的成本和延迟都可忽略，换来的是明显更宽的专名覆盖面。
     static let contextLimit = 30
 
-    /// 上下文的最大保鲜期。超过这个时间的旧输入大概率已经换了话题，
-    /// 留着只会误导模型。选 2 小时而不是几分钟：口述工作往往一个话题连续几小时，
-    /// 窗口太短会让上下文长期为空，等于没有这个功能。
-    static let contextMaxAge: TimeInterval = 2 * 60 * 60
+    /// 上下文的最大保鲜期。
+    ///
+    /// 2026-08-03 从 2 小时上调到 12 小时：实测日志里连续两次修正都是"上下文 0 条"，
+    /// 因为真实使用是零散的（今天用几次、隔一天再用），2 小时窗口几乎总是空的，
+    /// 等于这个功能没生效。12 小时覆盖一个完整工作日，跨天的旧话题仍会自然过期。
+    /// 冷启动的专名问题已由专名词典解决，上下文只需负责话题连续性。
+    static let contextMaxAge: TimeInterval = 12 * 60 * 60
 
     /// 过滤掉过期条目，并只保留最近 contextLimit 条。纯函数，可单测。
     static func freshContext(_ entries: [ContextEntry], now: Date = Date()) -> [ContextEntry] {
@@ -272,6 +275,13 @@ final class TextCorrector {
         return .success(cleaned)
     }
 
+    /// 日志用的文本形式：把换行显式化，过长时截断，避免一条日志刷屏。
+    static func forLog(_ text: String, limit: Int = 200) -> String {
+        let flat = text.replacingOccurrences(of: "\n", with: "⏎")
+        if flat.count <= limit { return flat }
+        return String(flat.prefix(limit)) + "…(共\(flat.count)字)"
+    }
+
     /// 判断服务端错误是不是"账号没钱了"。
     /// GLM 用 code `1113`，文案是"余额不足或无可用资源包,请充值"。
     /// 这类错误和网络故障的处置完全不同（一个要充值，一个等一会儿就好），必须分开。
@@ -374,11 +384,20 @@ final class TextCorrector {
         func finish(_ result: Result<String, CorrectionError>) {
             guard settled.claim() else { return }
             let cost = CFAbsoluteTimeGetCurrent() - started
+            // 记下修正前后的实际文本：只记字数的话，事后完全无法判断修正质量好不好，
+            // 而"效果不好"恰恰是最需要复盘的反馈（2026-08-03 加）。
             switch result {
             case .success(let s):
                 Log.log(String(format: "[Correct] 完成 model=%@ 用时=%.2fs 原文%d字→修正%d字", model, cost, text.count, s.count))
+                if s == text {
+                    Log.log("[Correct] 修正前后一致，原文: \(Self.forLog(text))")
+                } else {
+                    Log.log("[Correct] 修正前: \(Self.forLog(text))")
+                    Log.log("[Correct] 修正后: \(Self.forLog(s))")
+                }
             case .failure(let e):
                 Log.log(String(format: "[Correct] 失败 model=%@ 用时=%.2fs 原因=%@", model, cost, String(describing: e)))
+                Log.log("[Correct] 未修正的原文: \(Self.forLog(text))")
             }
             DispatchQueue.main.async { completion(result) }
         }

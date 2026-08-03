@@ -38,9 +38,13 @@ final class CorrectionFlowTests: XCTestCase {
         XCTAssertEqual(Config.correctionModelID, "glm-5.2")
     }
 
-    func testDefaultTimeoutIsSixSeconds() {
+    /// 实测 102 字文本的延迟是 2.4 / 4.1 / 4.9s（min/中位/max），
+    /// 6s 预算只比实测最大值高 1s，撞上 GLM 抖动就静默降级成粘原文。
+    /// 预算放宽在成功路径上零代价（成功时等的是真实延迟），只延长最坏情况。
+    func testDefaultTimeoutLeavesHeadroomOverObservedLatency() {
         UserDefaults.standard.removeObject(forKey: "correctionTimeout")
-        XCTAssertEqual(Config.correctionTimeout, 6.0, accuracy: 0.001)
+        XCTAssertGreaterThanOrEqual(Config.correctionTimeout, 10.0, "至少要给实测最大值一倍余量")
+        XCTAssertLessThanOrEqual(Config.correctionTimeout, 20.0, "再长就变成干等")
     }
 
     /// 超时是硬上限，用来保证语音输入不会卡死等模型。
@@ -186,10 +190,11 @@ final class CorrectionFlowTests: XCTestCase {
         XCTAssertEqual(TextCorrector.freshContext(entries, now: now).count, 1)
     }
 
-    /// 窗口太短会让上下文长期为空，等于没这个功能；太长会把昨天的话题带进来
-    func testContextMaxAgeIsHoursNotMinutes() {
-        XCTAssertGreaterThanOrEqual(TextCorrector.contextMaxAge, 30 * 60)
-        XCTAssertLessThanOrEqual(TextCorrector.contextMaxAge, 12 * 60 * 60)
+    /// 实测日志里连续两次修正都是"上下文 0 条"——真实使用是零散的，
+    /// 2 小时窗口几乎总是空的，等于功能没生效。要覆盖一个完整工作日。
+    func testContextMaxAgeCoversAFullWorkingDay() {
+        XCTAssertGreaterThanOrEqual(TextCorrector.contextMaxAge, 8 * 60 * 60)
+        XCTAssertLessThanOrEqual(TextCorrector.contextMaxAge, 24 * 60 * 60, "再长会把昨天的话题带进来")
     }
 
     // MARK: - 录音档位

@@ -357,3 +357,21 @@ private extension Result where Failure == CorrectionError {
         return nil
     }
 }
+
+/// 日志里必须能看到修正前后的实际文本，否则"效果不好"这种反馈事后完全无法复盘
+extension TextCorrectorTests {
+    func testLogFormFlattensNewlinesSoOneEntryStaysOneLine() {
+        XCTAssertEqual(TextCorrector.forLog("第一段\n\n第二段"), "第一段⏎⏎第二段")
+    }
+
+    func testLogFormTruncatesLongTextAndKeepsTheRealLength() {
+        let long = String(repeating: "字", count: 500)
+        let out = TextCorrector.forLog(long, limit: 50)
+        XCTAssertTrue(out.hasPrefix(String(repeating: "字", count: 50)))
+        XCTAssertTrue(out.contains("共500字"))
+    }
+
+    func testLogFormLeavesShortTextIntact() {
+        XCTAssertEqual(TextCorrector.forLog("产物在哪里"), "产物在哪里")
+    }
+}

@@ -416,10 +416,15 @@ enum Config {
 
     /// 本地预算：超过这个时间就放弃修正、直接粘贴原文。
     /// 语音输入绝不能卡死等模型，所以这是硬上限而非建议值。
+    ///
+    /// 默认 12s（2026-08-03 从 6s 上调）。实测 102 字文本跑 5 次是
+    /// 2.4 / 4.1 / 4.9s（min/中位/max），6s 只比实测最大值高 1s，撞上 GLM 抖动就超时，
+    /// 结果是静默降级粘原文、用户以为"修正效果不好"。
+    /// 放宽预算在成功路径上零代价（成功时等的是真实延迟，不是预算），只延长最坏情况。
     static var correctionTimeout: Double {
         get {
             let v = UserDefaults.standard.double(forKey: correctionTimeoutKey)
-            guard v > 0 else { return 6.0 }
+            guard v > 0 else { return 12.0 }
             return min(max(v, 1.0), 30.0)
         }
         set { UserDefaults.standard.set(min(max(newValue, 1.0), 30.0), forKey: correctionTimeoutKey) }

@@ -1228,9 +1228,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 // 任何失败都降级为原文粘贴，绝不阻断语音输入
                 Log.log("[Correct] 降级为原文粘贴，原因：\(err.userMessage)")
                 self.insertFinalText(original, originalText: original)
+                // 失败是静默的（照常粘贴原文），不提示的话用户只会觉得"修正效果不好"，
+                // 根本不知道模型压根没跑。用户自己按 ESC 取消的除外。
+                if err != .cancelled {
+                    self.notifyCorrectionFailed(err)
+                }
             }
         }
         abortCorrection = cancel
+    }
+
+    /// 修正失败时给一条可见提示。降级本身不影响使用，所以用通知而不是弹窗，
+    /// 但必须让用户知道"这次粘的是未修正的原文"。
+    private func notifyCorrectionFailed(_ err: CorrectionError) {
+        let content = UNMutableNotificationContent()
+        content.title = "AI 修正未生效"
+        content.body = "\(err.userMessage)，已粘贴未修正的原文"
+        let request = UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil)
+        UNUserNotificationCenter.current().add(request) { error in
+            if let error = error {
+                Log.log("[Correct] 失败通知发送不出去: \(error.localizedDescription)")
+            }
+        }
     }
 
     /// 关闭面板并把最终文本注入目标应用。

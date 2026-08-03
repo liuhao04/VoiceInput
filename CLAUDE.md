@@ -138,8 +138,11 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 **不可违反的约束**
 - **先修正再粘贴**。绝不改写已经贴出去的文本（要模拟选中+删除+重粘，失败会破坏用户文档）
 - **任何失败都降级为粘贴原文**：无 key、网络失败、超时、响应异常、用户中断，全部走 `insertFinalText(原文)`
-- `Config.correctionTimeout`（默认 6s）是硬上限。`TextCorrector.correct` 用本地定时器兜底，
-  即使 URLSession 不回调也保证在预算内解除面板等待
+- `Config.correctionTimeout`（默认 **12s**）是硬上限。`TextCorrector.correct` 用本地定时器兜底，
+  即使 URLSession 不回调也保证在预算内解除面板等待。
+  **2026-08-03 从 6s 上调**：实测 102 字文本延迟 2.4/4.1/4.9s（min/中位/max），6s 只比实测最大值
+  高 1s，撞上 GLM 抖动就超时降级，用户看到未修正原文却以为"修正效果不好"。
+  放宽预算在成功路径上零代价（成功时等的是真实延迟，不是预算），只延长最坏情况
 - ESC / 再按触发键 = 放弃修正、立即粘贴原文（不是丢弃文本）
 
 **GLM 接入的两条硬经验**（来自 ai-info 项目实测，不要重新踩）
@@ -160,6 +163,14 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 
 **设计通则**：本地只做确定性的、无歧义的处理；任何需要语义判断的一律交给模型。
 反例：本地赘词词表、`<40字不分段` 字符阈值、把映射式替换规则喂给模型。
+
+**排查"修正效果不好"先看日志**：`[Correct]` 会记完整的修正前 / 修正后文本
+（`TextCorrector.forLog`，换行显式化、>200 字截断）。只记字数的话事后完全无法复盘。
+2026-08-03 就踩过：用户反馈效果差，查日志发现那次根本是 `timedOut` 降级粘了原文，模型没跑。
+另外注意日志里的"上下文 N 条"，长期为 0 说明 `contextMaxAge` 相对真实使用频率太短。
+
+**失败要让用户看见**：修正失败照常粘贴原文，不提示的话用户只会觉得"修正效果不好"，
+不知道模型压根没跑。`notifyCorrectionFailed` 发系统通知说明原因（用户自己按 ESC 取消的除外）。
 
 **欠费是静默失败**：修正失败一律降级为粘贴原文，用户只会觉得"修正好像没生效"。
 所以 `CorrectionError.insufficientBalance` 单独成一类（`isArrears` 认 code 1113 和余额类文案），
@@ -183,7 +194,7 @@ The Python tests in `asr_test/` use the same Volcano Engine protocol as the Swif
 待做：同步到火山热词表（从识别源头干预），需先确认火山接口支持按 ID 读写热词内容。
 
 **上下文**：最近 30 条**实际采纳**的文本，持久化在 `Config.recentContextEntries`（UserDefaults），
-带时间戳，超过 `TextCorrector.contextMaxAge`（2 小时）的条目自动失效，连续重复不重记。
+带时间戳，超过 `TextCorrector.contextMaxAge`（**12 小时**，2026-08-03 从 2 小时上调，因为实测日志里连续两次都是「上下文 0 条」）的条目自动失效，连续重复不重记。
 30 条约 1~2k prompt token，实测没有带来稳定的延迟增长（同规模两次请求 2.0s / 1.2s，差异是服务端抖动）。
 存的永远是最终版本，优先级天然是**用户手改 > 模型修正 > ASR 原文**，因为写入点
 （`insertFinalText` / `handleEditingFinished` / `handleEditingCancelled`）都在文本被采用之后。
