@@ -34,6 +34,8 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     private var hintLabel: NSTextField!
     private var separatorLine: NSBox!
     private var continueButton: NSButton!
+    private var correctButton: NSButton!
+    private var revertButton: NSButton!
     private var waitingSpinner: NSProgressIndicator!
 
     var onPanelClicked: (() -> Void)?
@@ -41,6 +43,23 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     var onCancelled: (() -> Void)?
     var onEditingCancelled: (() -> Void)?
     var onContinueRecording: (() -> Void)?
+    /// 用户点了面板上的「修正」按钮
+    var onCorrectRequested: (() -> Void)?
+
+    /// 面板所处阶段。修正不再自动发生，用户点按钮才触发，结果只覆盖面板文字。
+    enum Stage {
+        case recording        // 录音中
+        case awaitingAction   // 识别完成，等用户决定：插入 / 修正 / 编辑 / 取消
+        case correcting       // 正在调模型
+        case showingDiff      // 显示修正前后的批阅式 diff
+    }
+    private(set) var stage: Stage = .recording
+
+    /// 修正前的文本（进入 diff 前面板上的内容），用于「还原」
+    private var textBeforeCorrection: String = ""
+    /// 模型给出的修正结果纯文本，用于「采用」和最终插入
+    private(set) var correctedText: String?
+
     private(set) var isEditing = false
     /// 覆盖 hint 栏文案的临时状态（AI 修正中 / 已降档提示）。
     /// 非 nil 时 updateHintText 不再写回默认文案。
@@ -95,6 +114,25 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         continueButton.frame = NSRect(x: totalWidth - padding - buttonWidth, y: 2, width: buttonWidth, height: hintBarHeight - 4)
         continueButton.autoresizingMask = [.minXMargin]
         hintBar.addSubview(continueButton)
+
+        // 「修正」和「还原」：修正改成用户主动触发，所以按钮必须一直在手边
+        correctButton = NSButton(title: "修正", target: nil, action: nil)
+        correctButton.bezelStyle = .recessed
+        correctButton.controlSize = .small
+        correctButton.font = NSFont.systemFont(ofSize: 11)
+        correctButton.isHidden = true
+        correctButton.frame = NSRect(x: totalWidth - padding - 44, y: 2, width: 44, height: hintBarHeight - 4)
+        correctButton.autoresizingMask = [.minXMargin]
+        hintBar.addSubview(correctButton)
+
+        revertButton = NSButton(title: "还原", target: nil, action: nil)
+        revertButton.bezelStyle = .recessed
+        revertButton.controlSize = .small
+        revertButton.font = NSFont.systemFont(ofSize: 11)
+        revertButton.isHidden = true
+        revertButton.frame = NSRect(x: totalWidth - padding - 44 - 48, y: 2, width: 44, height: hintBarHeight - 4)
+        revertButton.autoresizingMask = [.minXMargin]
+        hintBar.addSubview(revertButton)
 
         hintLabel = NSTextField(labelWithString: "")
         hintLabel.font = NSFont.systemFont(ofSize: 11)
@@ -152,6 +190,20 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         }
         continueButton.target = self
         continueButton.action = #selector(continueButtonClicked)
+        correctButton.target = self
+        correctButton.action = #selector(correctButtonClicked)
+        revertButton.target = self
+        revertButton.action = #selector(revertButtonClicked)
+    }
+
+    @objc private func correctButtonClicked() {
+        Log.log("[Panel] 点击修正按钮")
+        onCorrectRequested?()
+    }
+
+    @objc private func revertButtonClicked() {
+        Log.log("[Panel] 点击还原按钮")
+        revertCorrection()
     }
 
     @objc private func continueButtonClicked() {
@@ -163,30 +215,147 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         if let override = hintOverride {
             hintLabel.stringValue = override
             continueButton.isHidden = true
+            correctButton.isHidden = true
+            revertButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2
             return
         }
         if isEditing {
             hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 确认插入    tip:可在识别历史中查看"
             continueButton.isHidden = false
-            // hint label 缩短宽度，给按钮让出空间
-            let buttonSpace: CGFloat = 80
-            hintLabel.frame.size.width = panel.frame.width - padding * 2 - buttonSpace
-        } else {
-            hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 结束识别    点击文字进入编辑"
-            continueButton.isHidden = true
-            hintLabel.frame.size.width = panel.frame.width - padding * 2
+            correctButton.isHidden = true
+            revertButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 80
+            return
         }
+
+        continueButton.isHidden = true
+        switch stage {
+        case .recording:
+            hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 结束识别    点击文字编辑"
+            correctButton.isHidden = true
+            revertButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2
+        case .awaitingAction:
+            hintLabel.stringValue = "⏎/快捷键 : 插入    点击文字编辑    ESC : 取消"
+            correctButton.isHidden = false
+            correctButton.title = correctedText == nil ? "修正" : "重新修正"
+            revertButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
+        case .correcting:
+            hintLabel.stringValue = "AI 修正中…    ESC : 放弃修正"
+            correctButton.isHidden = true
+            revertButton.isHidden = true
+            hintLabel.frame.size.width = panel.frame.width - padding * 2
+        case .showingDiff:
+            correctButton.isHidden = true
+            revertButton.isHidden = false
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
+            // 具体文案由 showDiff 写入 diffSummary，这里只负责布局
+            hintLabel.stringValue = diffSummary
+        }
+    }
+
+    /// diff 视图下的 hint 文案（含改动统计），由 showDiff 计算
+    private var diffSummary: String = ""
+
+    // MARK: - 阶段切换
+
+    /// 识别结束，面板停留等用户决定。修正不再自动发生。
+    func enterAwaitingAction() {
+        hideWaitingDots()
+        hintOverride = nil
+        stage = .awaitingAction
+        updateHintText()
+    }
+
+    func enterCorrecting() {
+        hintOverride = nil
+        stage = .correcting
+        updateHintText()
+        showWaitingDots()
+    }
+
+    /// 修正完成：以批阅样式展示改动。文本区在此状态下只读，
+    /// 因为里面混着"已删除"的内容，直接编辑会让显示和真实文本对不上。
+    func showDiff(original: String, corrected: String) {
+        hideWaitingDots()
+        hintOverride = nil
+        textBeforeCorrection = original
+        correctedText = corrected
+
+        let ops = TextDiff.diff(original, corrected)
+        guard TextDiff.hasChanges(ops) else {
+            // 模型没动任何东西，没必要给用户看一堆没变化的文字
+            correctedText = nil
+            diffSummary = ""
+            stage = .awaitingAction
+            hintOverride = "AI 修正：模型认为无需改动"
+            updateHintText()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                guard let self = self, self.stage == .awaitingAction else { return }
+                self.clearHintOverride()
+            }
+            return
+        }
+
+        let (deleted, inserted) = TextDiff.stats(ops)
+        diffSummary = "删\(deleted)字 加\(inserted)字    ⏎/快捷键 : 采用并插入    ESC : 取消"
+
+        textView.isEditable = false
+        textView.textStorage?.setAttributedString(
+            TextDiff.attributedString(ops, font: textView.font ?? NSFont.systemFont(ofSize: 14))
+        )
+        asrTextLength = 0
+        asrInsertionPoint = 0
+        stage = .showingDiff
+        updateHintText()
+        resizePanelToFitText()
+    }
+
+    /// 放弃修正结果，面板回到修正前的文本
+    func revertCorrection() {
+        guard stage == .showingDiff else { return }
+        correctedText = nil
+        setPlainText(textBeforeCorrection)
+        stage = .awaitingAction
+        updateHintText()
+    }
+
+    /// diff 视图下要插入的文本：修正版。其他情况用面板当前文字。
+    func textToInsert() -> String {
+        if stage == .showingDiff, let corrected = correctedText { return corrected }
+        return textView.string
+    }
+
+    /// 把面板换成纯文本（去掉 diff 的样式），恢复可编辑
+    private func setPlainText(_ text: String) {
+        textView.isEditable = true
+        textView.textStorage?.setAttributedString(NSAttributedString(string: text, attributes: [
+            .font: textView.font ?? NSFont.systemFont(ofSize: 14),
+            .foregroundColor: NSColor.labelColor,
+        ]))
+        asrInsertionPoint = 0
+        asrTextLength = (text as NSString).length
+        resizePanelToFitText()
     }
 
     private func handlePanelClick() {
         if isEditing { return }
+        if stage == .correcting { return }
+        if stage == .showingDiff {
+            // diff 里混着已删除的文字，直接编辑会让显示和真实内容对不上。
+            // 先「还原」或按 ⏎ 采用，回到纯文本再编辑。
+            flashHint("批阅视图不能直接编辑，请先「还原」或按 ⏎ 采用")
+            return
+        }
         Log.log("[Panel] 点击面板，停止录音进入编辑模式")
         onPanelClicked?()
     }
 
     func enterEditMode() {
         hideWaitingDots()
+        stage = .awaitingAction
         isEditing = true
         updateHintText()
 
@@ -214,7 +383,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
 
     /// ASR 流式结果：在 asrInsertionPoint 处插入/替换文本
     func insertOrReplaceASRText(_ text: String) {
-        guard panel.isVisible, !isEditing else { return }
+        guard panel.isVisible, !isEditing, stage == .recording else { return }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let nsString = textView.string as NSString
         let safeStart = min(asrInsertionPoint, nsString.length)
@@ -355,20 +524,13 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
 
     // MARK: - AI 修正状态
 
-    /// 进入"AI 修正中"状态：保持面板可见，末尾转圈，hint 栏提示可直接粘贴原文
-    func showCorrectingState() {
-        hintOverride = "AI 修正中…    ESC / 快捷键 : 直接粘贴原文"
+    /// 在 hint 栏临时显示一条消息，几秒后自动恢复。用于"修正失败""无需改动"这类
+    /// 不该打断流程、但用户必须知道的提示。
+    func flashHint(_ message: String, seconds: TimeInterval = 3.0) {
+        hintOverride = message
         updateHintText()
-        showWaitingDots()
-    }
-
-    /// 提示本次会话已降档为快速模式（双击触发键的效果）
-    func showFastModeBadge() {
-        hintOverride = "已切换为快速模式（本次不做 AI 修正）"
-        updateHintText()
-        // 2 秒后恢复常规提示，避免用户误以为面板卡住
-        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
-            guard let self = self, self.hintOverride?.hasPrefix("已切换为快速模式") == true else { return }
+        DispatchQueue.main.asyncAfter(deadline: .now() + seconds) { [weak self] in
+            guard let self = self, self.hintOverride == message else { return }
             self.clearHintOverride()
         }
     }
@@ -436,6 +598,11 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     func hide() {
         hideWaitingDots()
         hintOverride = nil
+        stage = .recording
+        correctedText = nil
+        textBeforeCorrection = ""
+        diffSummary = ""
+        textView.isEditable = true
         if isEditing {
             exitEditMode()
         }

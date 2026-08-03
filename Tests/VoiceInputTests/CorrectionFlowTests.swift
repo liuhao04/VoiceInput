@@ -197,47 +197,32 @@ final class CorrectionFlowTests: XCTestCase {
         XCTAssertLessThanOrEqual(TextCorrector.contextMaxAge, 24 * 60 * 60, "再长会把昨天的话题带进来")
     }
 
-    // MARK: - 录音档位
+    // MARK: - 历史三列
 
-    @MainActor
-    func testRecordingModeDefaultsToRefined() {
-        _ = NSApplication.shared
-        let delegate = AppDelegate()
-        XCTAssertEqual(delegate.currentRecordingMode, .refined)
+    /// 识别结果 / 修正结果 / 编辑后 三列各自独立，才能事后评估模型改了什么。
+    /// 与 ASR 原文相同的不重复记，保持"这一列真的产生了变化"的语义。
+    func testHistoryEntryCarriesAllThreeTexts() {
+        let e = HistoryEntry(text: "原始识别", app: "Berth", corrected: "修正结果", edited: "手改结果")
+        XCTAssertEqual(e.text, "原始识别")
+        XCTAssertEqual(e.corrected, "修正结果")
+        XCTAssertEqual(e.edited, "手改结果")
     }
 
-    /// 降档窗口要足够短，不能长到把用户"说完一句就停"的正常操作误判成降档
-    @MainActor
-    func testFastModeWindowIsShortEnoughToNotSwallowRealStops() {
-        _ = NSApplication.shared
-        let delegate = AppDelegate()
-        let saved = Config.triggerActivation
-        defer { Config.triggerActivation = saved }
-
-        // 下限：要容得下一次从容的双击（触发本身还带 0.2s 确认延迟）
-        // 上限：再长就会把"说了一个字就想停"的正常操作误判成降档
-        Config.triggerActivation = .singleTap
-        XCTAssertGreaterThanOrEqual(delegate.fastModeWindow, 0.6)
-        XCTAssertLessThanOrEqual(delegate.fastModeWindow, 0.9)
+    func testHistoryEntryRoundTripsThroughJSON() throws {
+        let e = HistoryEntry(text: "原始识别", app: "Berth", corrected: "修正结果", edited: nil)
+        let data = try JSONEncoder().encode(e)
+        let back = try JSONDecoder().decode(HistoryEntry.self, from: data)
+        XCTAssertEqual(back.text, "原始识别")
+        XCTAssertEqual(back.corrected, "修正结果")
+        XCTAssertNil(back.edited)
     }
 
-    /// 双击触发时，用户要再完成一整个双击才算降档，需要更长的窗口。
-    /// 早期版本把降档限定在 singleTap，双击触发的用户完全用不上快速档。
-    @MainActor
-    func testFastModeWindowIsLongerWhenTriggerItselfIsADoubleTap() {
-        _ = NSApplication.shared
-        let delegate = AppDelegate()
-        let saved = Config.triggerActivation
-        defer { Config.triggerActivation = saved }
-
-        Config.triggerActivation = .singleTap
-        let single = delegate.fastModeWindow
-        Config.triggerActivation = .doubleTap
-        let double = delegate.fastModeWindow
-
-        XCTAssertGreaterThan(double, single, "双击触发时降档窗口必须更长")
-        XCTAssertLessThanOrEqual(double, 1.6, "再长就会把正常的短句停止误判成降档")
+    /// 老历史文件没有 corrected 字段，必须还能读
+    func testHistoryEntryDecodesLegacyEntryWithoutCorrected() throws {
+        let json = #"{"time":"2026-08-01T12:00:00+0800","app":"Berth","text":"旧记录","edited":"改过"}"#
+        let back = try JSONDecoder().decode(HistoryEntry.self, from: Data(json.utf8))
+        XCTAssertEqual(back.text, "旧记录")
+        XCTAssertNil(back.corrected)
+        XCTAssertEqual(back.edited, "改过")
     }
 }
-
-extension AppDelegate.RecordingMode: Equatable {}

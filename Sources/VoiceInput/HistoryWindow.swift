@@ -127,15 +127,22 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         tableView.addTableColumn(appCol)
 
         let textCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("text"))
-        textCol.title = "识别文本"
-        textCol.width = 280
+        textCol.title = "识别结果"
+        textCol.width = 240
         textCol.minWidth = 100
         textCol.resizingMask = [.userResizingMask, .autoresizingMask]
         tableView.addTableColumn(textCol)
 
+        let correctedCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("corrected"))
+        correctedCol.title = "修正结果"
+        correctedCol.width = 240
+        correctedCol.minWidth = 80
+        correctedCol.resizingMask = [.userResizingMask, .autoresizingMask]
+        tableView.addTableColumn(correctedCol)
+
         let editedCol = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("edited"))
         editedCol.title = "编辑后"
-        editedCol.width = 280
+        editedCol.width = 240
         editedCol.minWidth = 80
         editedCol.resizingMask = [.userResizingMask, .autoresizingMask]
         tableView.addTableColumn(editedCol)
@@ -282,7 +289,7 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         let texts = selectedRows.compactMap { row -> String? in
             guard row < entries.count else { return nil }
             let entry = entries[row]
-            return entry.edited ?? entry.text
+            return entry.edited ?? entry.corrected ?? entry.text
         }
 
         let combined = texts.joined(separator: "\n")
@@ -334,6 +341,9 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         case "text":
             cell.stringValue = entry.text
             cell.textColor = .labelColor
+        case "corrected":
+            cell.stringValue = entry.corrected ?? ""
+            cell.textColor = entry.corrected != nil ? .systemPurple : .secondaryLabelColor
         case "edited":
             cell.stringValue = entry.edited ?? ""
             cell.textColor = entry.edited != nil ? .systemBlue : .secondaryLabelColor
@@ -351,14 +361,16 @@ final class HistoryWindow: NSObject, NSWindowDelegate, NSTableViewDataSource, NS
         let font = NSFont.systemFont(ofSize: 12)
         let minHeight: CGFloat = 24
 
-        let textColWidth = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("text"))?.width ?? 200
-        let editedColWidth = tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier("edited"))?.width ?? 200
+        func colWidth(_ id: String) -> CGFloat {
+            tableView.tableColumn(withIdentifier: NSUserInterfaceItemIdentifier(id))?.width ?? 200
+        }
 
         let padding: CGFloat = 8
-        let textHeight = heightForString(entry.text, width: textColWidth - padding, font: font)
-        let editedHeight = heightForString(entry.edited ?? "", width: editedColWidth - padding, font: font)
+        let textHeight = heightForString(entry.text, width: colWidth("text") - padding, font: font)
+        let correctedHeight = heightForString(entry.corrected ?? "", width: colWidth("corrected") - padding, font: font)
+        let editedHeight = heightForString(entry.edited ?? "", width: colWidth("edited") - padding, font: font)
 
-        let maxH = max(textHeight, editedHeight)
+        let maxH = max(textHeight, max(correctedHeight, editedHeight))
         return max(minHeight, maxH + 8)
     }
 

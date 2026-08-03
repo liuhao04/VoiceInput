@@ -3,19 +3,23 @@ import Foundation
 
 struct HistoryEntry: Codable {
     let time: Date
+    /// ASR 原始识别结果
     let text: String
     let app: String
-    /// 手动编辑后的文本，仅当用户修改了识别结果时才有值
+    /// 大模型修正后的文本，仅当用户点了「修正」且模型确实改了才有值
+    let corrected: String?
+    /// 用户手动编辑后的文本，仅当用户改过才有值
     let edited: String?
 
     private enum CodingKeys: String, CodingKey {
-        case time, text, app, edited
+        case time, text, app, corrected, edited
     }
 
-    init(time: Date = Date(), text: String, app: String, edited: String? = nil) {
+    init(time: Date = Date(), text: String, app: String, corrected: String? = nil, edited: String? = nil) {
         self.time = time
         self.text = text
         self.app = app
+        self.corrected = corrected
         self.edited = edited
     }
 
@@ -25,6 +29,7 @@ struct HistoryEntry: Codable {
         time = HistoryEntry.dateFormatter.date(from: timeStr) ?? Date()
         text = try container.decode(String.self, forKey: .text)
         app = try container.decode(String.self, forKey: .app)
+        corrected = try container.decodeIfPresent(String.self, forKey: .corrected)
         edited = try container.decodeIfPresent(String.self, forKey: .edited)
     }
 
@@ -33,6 +38,7 @@ struct HistoryEntry: Codable {
         try container.encode(HistoryEntry.dateFormatter.string(from: time), forKey: .time)
         try container.encode(text, forKey: .text)
         try container.encode(app, forKey: .app)
+        try container.encodeIfPresent(corrected, forKey: .corrected)
         try container.encodeIfPresent(edited, forKey: .edited)
     }
 
@@ -105,26 +111,30 @@ enum RecognitionHistory {
         historyDir.appendingPathComponent(filename(year: year, month: month))
     }
 
-    /// 追加一条记录。originalText 为 ASR 原始结果，text 为实际插入的文本（可能经用户编辑）。
+    /// 追加一条记录。三段文本各自独立记录，便于事后评估修正质量：
+    /// - `asrText`：ASR 原始识别结果
+    /// - `corrected`：大模型修正后（没修正或模型没改动时传 nil）
+    /// - `edited`：用户手改后（没手改时传 nil）
+    ///
     /// 历史目录位于 iCloud Drive，文件系统偶尔会同步阻塞；写入放到后台队列避免卡住菜单栏 UI。
-    static func append(text: String, app: String, originalText: String? = nil) {
+    static func append(asrText: String, app: String, corrected: String? = nil, edited: String? = nil) {
         guard Config.historyEnabled else {
             Log.log("[History] 历史记录已关闭，跳过写入")
             return
         }
         let entryTime = Date()
         queue.async {
-            appendSync(text: text, app: app, originalText: originalText, time: entryTime)
+            appendSync(asrText: asrText, app: app, corrected: corrected, edited: edited, time: entryTime)
         }
     }
 
-    private static func appendSync(text: String, app: String, originalText: String?, time: Date) {
+    private static func appendSync(asrText: String, app: String, corrected: String?, edited: String?, time: Date) {
         ensureDirectory()
 
-        // 如果 originalText 与 text 不同，记录编辑后的文本
-        let edited: String? = if let orig = originalText, orig != text { text } else { nil }
-        let recorded = originalText ?? text
-        let entry = HistoryEntry(time: time, text: recorded, app: app, edited: edited)
+        // 与 ASR 原文相同的就不重复记，保持列的语义是"这一列真的产生了变化"
+        let correctedValue = (corrected == asrText) ? nil : corrected
+        let editedValue = (edited == asrText || edited == correctedValue) ? nil : edited
+        let entry = HistoryEntry(time: time, text: asrText, app: app, corrected: correctedValue, edited: editedValue)
 
         // 手动拼 JSON 以保证字段顺序：time, app, text, edited
         func esc(_ s: String) -> String {
@@ -136,6 +146,9 @@ enum RecognitionHistory {
         }
         let timeStr = HistoryEntry.dateFormatter.string(from: entry.time)
         var line = "{\"time\":\"\(esc(timeStr))\",\"app\":\"\(esc(entry.app))\",\"text\":\"\(esc(entry.text))\""
+        if let co = entry.corrected {
+            line += ",\"corrected\":\"\(esc(co))\""
+        }
         if let ed = entry.edited {
             line += ",\"edited\":\"\(esc(ed))\""
         }
@@ -157,7 +170,7 @@ enum RecognitionHistory {
             try? line.data(using: .utf8)?.write(to: path)
         }
 
-        Log.log("[History] 已记录: \(text.prefix(30))... → \(app)")
+        Log.log("[History] 已记录: ASR \(asrText.count)字, 修正\(correctedValue == nil ? "无" : "\(correctedValue!.count)字"), 编辑\(editedValue == nil ? "无" : "\(editedValue!.count)字") → \(app)")
     }
 
     /// 加载指定月份的记录
