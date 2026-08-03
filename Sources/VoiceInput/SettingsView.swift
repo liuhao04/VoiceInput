@@ -117,6 +117,7 @@ struct SettingsView: View {
     @State private var correctionQuality: CorrectionQuality = Config.correctionQuality
     @State private var correctionAPIKey: String = Config.correctionAPIKey
     @State private var correctionTimeout: Double = Config.correctionTimeout
+    @State private var correctionRemoveFillers: Bool = Config.correctionRemoveFillers
     @State private var correctionSaveStatus: String? = nil
     @State private var correctionStatusIsError: Bool = false
     @State private var correctionTesting: Bool = false
@@ -691,6 +692,22 @@ struct SettingsView: View {
                     formRow("API Key:", text: $correctionAPIKey)
 
                     HStack(spacing: 8) {
+                        Text("口语赘词:")
+                            .frame(width: labelWidth, alignment: .trailing)
+                        Picker("", selection: $correctionRemoveFillers) {
+                            Text("清理").tag(true)
+                            Text("保留原话").tag(false)
+                        }
+                        .labelsHidden()
+                        .pickerStyle(.segmented)
+                        .frame(maxWidth: 180, alignment: .leading)
+                        Text("去掉口头禅、语气词、说话时的自我打断")
+                            .font(.caption)
+                            .foregroundColor(.secondary)
+                        Spacer()
+                    }
+
+                    HStack(spacing: 8) {
                         Text("修正超时:")
                             .frame(width: labelWidth, alignment: .trailing)
                         Stepper(
@@ -788,6 +805,7 @@ struct SettingsView: View {
         Config.correctionAPIKey = key
         Config.correctionQuality = correctionQuality
         Config.correctionTimeout = correctionTimeout
+        Config.correctionRemoveFillers = correctionRemoveFillers
         Config.correctionEnabled = correctionEnabled
         correctionAPIKey = key
         if !silent {

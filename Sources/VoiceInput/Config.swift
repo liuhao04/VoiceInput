@@ -140,6 +140,7 @@ enum Config {
     private static let glmApiKeyKey = "glmApiKey"
     private static let recentContextKey = "recentContext"
     private static let properNounsKey = "properNouns"
+    private static let correctionRemoveFillersKey = "correctionRemoveFillers"
 
     /// Personal 版"从分发版迁移 UserDefaults"只执行一次的标记
     private static let personalMigrationKey = "personalMigratedFromDistribution_v1"
@@ -447,6 +448,18 @@ enum Config {
             case .glm: glmApiKey = newValue
             }
         }
+    }
+
+    /// 是否让模型清理口语赘词（口头禅、语气词、自我打断和重复起头）。默认开。
+    ///
+    /// 这个开关切换的是**两套 prompt**，本地不做任何赘词处理：赘词和实词的区别
+    /// 只有语境能判断（「那个文件在哪」里的"那个"是指示代词），本地词表必然误删。
+    static var correctionRemoveFillers: Bool {
+        get {
+            guard UserDefaults.standard.object(forKey: correctionRemoveFillersKey) != nil else { return true }
+            return UserDefaults.standard.bool(forKey: correctionRemoveFillersKey)
+        }
+        set { UserDefaults.standard.set(newValue, forKey: correctionRemoveFillersKey) }
     }
 
     /// 专名词典：用户自己声明的专有名词，**只有词、没有映射**。

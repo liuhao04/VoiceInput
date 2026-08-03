@@ -315,17 +315,22 @@ final class TextCorrectorTests: XCTestCase {
     /// 实测教训：只写"按语义分段换行"时模型一个换行都不给，159 字口述照样堆成一整段。
     /// 必须带上"宁可多分一段"这类强指示，分段才真的会发生。
     func testSystemPromptPushesHardOnParagraphBreaks() {
-        XCTAssertTrue(TextCorrector.systemPrompt.contains("分段"))
-        XCTAssertTrue(TextCorrector.systemPrompt.contains("宁可多分一段"))
+        XCTAssertTrue(TextCorrector.systemPrompt(removeFillers: true).contains("分段"))
+        XCTAssertTrue(TextCorrector.systemPrompt(removeFillers: true).contains("宁可多分一段"))
     }
 
-    func testSystemPromptForbidsAddingOrAnsweringContent() {
-        XCTAssertTrue(TextCorrector.systemPrompt.contains("不回答文本里的问题"))
-        XCTAssertTrue(TextCorrector.systemPrompt.contains("严禁增删语义内容"))
+    /// 两套 prompt 都必须禁止"增加内容"和"回答文本里的问题"。
+    /// 区别只在删除：清理档放宽成"严禁增加"，保真档维持"严禁增删"。
+    func testBothVariantsForbidAddingOrAnsweringContent() {
+        for p in [TextCorrector.systemPrompt(removeFillers: true),
+                  TextCorrector.systemPrompt(removeFillers: false)] {
+            XCTAssertTrue(p.contains("不回答文本里的问题"))
+            XCTAssertTrue(p.contains("不补充信息"))
+        }
     }
 
     func testSystemPromptForbidsTrailingSentencePunctuation() {
-        XCTAssertTrue(TextCorrector.systemPrompt.contains("不要在整段文本的末尾添加句号"))
+        XCTAssertTrue(TextCorrector.systemPrompt(removeFillers: true).contains("不要在整段文本的末尾添加句号"))
     }
 
     // MARK: - 包裹清理
@@ -373,5 +378,57 @@ extension TextCorrectorTests {
 
     func testLogFormLeavesShortTextIntact() {
         XCTAssertEqual(TextCorrector.forLog("产物在哪里"), "产物在哪里")
+    }
+}
+
+/// 口语赘词开关切换的是两套 prompt，本地不做任何赘词处理。
+/// 赘词和实词的区别只有语境能判断（「那个文件」里的"那个"是指示代词），本地词表必然误删。
+extension TextCorrectorTests {
+    func testFillerRemovalPromptAllowsDeletingFalseStarts() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertTrue(p.contains("【口语清理】"))
+        XCTAssertTrue(p.contains("自我打断"))
+        XCTAssertTrue(p.contains("只删不改"))
+    }
+
+    /// 允许删赘词时，"严禁增删"必须放宽成"严禁增加"，否则模型会守着旧约束不动手
+    func testFillerRemovalPromptRelaxesTheNoDeletionRule() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertTrue(p.contains("严禁增加"))
+        XCTAssertFalse(p.contains("严禁增删语义内容"))
+    }
+
+    func testVerbatimPromptKeepsTheStrictNoEditRule() {
+        let p = TextCorrector.systemPrompt(removeFillers: false)
+        XCTAssertTrue(p.contains("严禁增删语义内容"))
+        XCTAssertTrue(p.contains("【保留原话】"))
+        XCTAssertFalse(p.contains("【口语清理】"))
+    }
+
+    /// 指示代词必须显式保护，否则模型会把「那个文件」的"那个"当口头禅删掉
+    func testFillerRemovalPromptProtectsDemonstratives() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertTrue(p.contains("指示代词"))
+        XCTAssertTrue(p.contains("必须保留"))
+    }
+
+    /// 两套 prompt 的排版和输出要求必须一致，只在赘词处理上分叉
+    func testBothVariantsShareFormattingAndOutputRules() {
+        for p in [TextCorrector.systemPrompt(removeFillers: true),
+                  TextCorrector.systemPrompt(removeFillers: false)] {
+            XCTAssertTrue(p.contains("宁可多分一段"))
+            XCTAssertTrue(p.contains("不要在整段文本的末尾添加句号"))
+            XCTAssertTrue(p.contains("不要任何前言"))
+        }
+    }
+
+    func testRequestBodyPicksThePromptVariant() {
+        let strip = TextCorrector.buildRequestBody(
+            model: "m", text: "测试", context: [], properNouns: [], removeFillers: true)
+        let keep = TextCorrector.buildRequestBody(
+            model: "m", text: "测试", context: [], properNouns: [], removeFillers: false)
+        let sysOf: ([String: Any]) -> String = { ($0["messages"] as! [[String: String]])[0]["content"]! }
+        XCTAssertTrue(sysOf(strip).contains("【口语清理】"))
+        XCTAssertTrue(sysOf(keep).contains("【保留原话】"))
     }
 }

@@ -148,23 +148,57 @@ final class TextCorrector {
     /// 分段那条写得比较重，是实测调出来的：只说"按语义分段换行"时，
     /// 模型基本只补标点、一个换行都不给，159 字的口述照样堆成一整段。
     /// 必须明确"宁可多分一段"才会真的分。
-    static let systemPrompt = """
-    你是语音识别结果的校对员。用户通过语音口述产生了一段文本，你要修正识别错误并整理排版。
+    /// 系统提示词。分「保留原话」和「清理赘词」两套，由 `Config.correctionRemoveFillers` 选。
+    ///
+    /// 两套 prompt 而不是本地词表：赘词和实词的区别只有语境能判断
+    /// （「**那个**文件在哪」里的"那个"是指示代词），本地维护 `呃/那个/就是说` 之类的
+    /// 词表必然误删。凡是需要理解意思的，一律交给模型。
+    static func systemPrompt(removeFillers: Bool) -> String {
+        let correctness = removeFillers
+            ? """
+            【纠错】
+            - 修正同音字、近音字、专有名词的写法与大小写、中英文混排。
+            - **严禁增加**语义内容：不补充信息、不解释、不回答文本里的问题、不总结、不评论。
+              删除只限于下面【口语清理】允许的范围。
+            - 拿不准就保持原样，宁可不改也不要改错。
+            """
+            : """
+            【纠错】
+            - 修正同音字、近音字、专有名词的写法与大小写、中英文混排。
+            - 严禁增删语义内容：不补充信息、不解释、不回答文本里的问题、不总结、不评论。
+            - 拿不准就保持原样，宁可不改也不要改错。
+            """
 
-    【纠错】
-    - 修正同音字、近音字、专有名词的写法与大小写、中英文混排。
-    - 严禁增删语义内容：不补充信息、不解释、不回答文本里的问题、不总结、不评论。
-    - 拿不准就保持原样，宁可不改也不要改错。
+        let fillers = removeFillers
+            ? """
 
-    【排版】
-    - 句内按语义补齐逗号、顿号等标点。
-    - **分段**：口述文本往往是连续一大段。只要文本包含多个意群（话题转折、并列的几件事、先说现象再说想法），就用换行把它拆成多个自然段，一段一个意思。宁可多分一段，也不要堆成一坨。
-    - 单个意群的短句保持单行，不要为了分段而分段。
-    - **不要在整段文本的末尾添加句号、问号、感叹号**。用户常常把结果粘进搜索框或命令行，末尾的结束标点是多余的。段落中间的标点正常保留。
+            【口语清理】
+            - 去掉口头禅和语气词（呃、那个、就是说、然后呢…），以及说话时的自我打断和重复起头。
+              例：「我希望它一旦处于，一旦切换到非 busy 状态」→「我希望它一旦切换到非 busy 状态」。
+            - **只删不改**：不要换成别的说法、不要润色成书面语、不要改变原意和语气。
+            - 「那个」「这个」当指示代词用时（那个文件、这个项目）是实词，必须保留。
+            """
+            : """
 
-    【输出】
-    直接输出修正后的文本本身。不要任何前言、说明、引号包裹或代码块包裹。
-    """
+            【保留原话】
+            - 用户要的是逐字保真。口头禅、语气词、重复起头一律保留，只做纠错和排版。
+            """
+
+        return """
+        你是语音识别结果的校对员。用户通过语音口述产生了一段文本，你要修正识别错误并整理排版。
+
+        \(correctness)\(fillers)
+
+        【排版】
+        - 句内按语义补齐逗号、顿号等标点。
+        - **分段**：口述文本往往是连续一大段。只要文本包含多个意群（话题转折、并列的几件事、先说现象再说想法），就用换行把它拆成多个自然段，一段一个意思。宁可多分一段，也不要堆成一坨。
+        - 单个意群的短句保持单行，不要为了分段而分段。
+        - **不要在整段文本的末尾添加句号、问号、感叹号**。用户常常把结果粘进搜索框或命令行，末尾的结束标点是多余的。段落中间的标点正常保留。
+
+        【输出】
+        直接输出修正后的文本本身。不要任何前言、说明、引号包裹或代码块包裹。
+        """
+    }
 
     /// 构建用户消息。三块用明确的分隔标记隔开，避免模型把参考资料当成需要修正的内容。
     ///
@@ -217,14 +251,15 @@ final class TextCorrector {
         model: String,
         text: String,
         context: [String],
-        properNouns: [String] = []
+        properNouns: [String] = [],
+        removeFillers: Bool = true
     ) -> [String: Any] {
         // 中文大致 1 字 ≈ 1~2 token，留 3 倍余量，并给一个下限和上限
         let budget = min(4096, max(512, text.count * 3))
         return [
             "model": model,
             "messages": [
-                ["role": "system", "content": systemPrompt],
+                ["role": "system", "content": systemPrompt(removeFillers: removeFillers)],
                 ["role": "user", "content": buildUserPrompt(text: text, context: context, properNouns: properNouns)],
             ],
             "thinking": ["type": "disabled"],
@@ -370,7 +405,10 @@ final class TextCorrector {
         request.timeoutInterval = timeout
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        let body = Self.buildRequestBody(model: model, text: text, context: context, properNouns: properNouns)
+        let body = Self.buildRequestBody(
+            model: model, text: text, context: context,
+            properNouns: properNouns, removeFillers: Config.correctionRemoveFillers
+        )
         guard let bodyData = try? JSONSerialization.data(withJSONObject: body) else {
             DispatchQueue.main.async { completion(.failure(.malformed)) }
             return {}
