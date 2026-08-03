@@ -68,6 +68,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     var asrOriginalText: String = ""
     /// 本轮模型给出的修正结果（用户点过「修正」且模型确实改了才有值）
     var correctionResult: String?
+    /// 录音中点了「修正」：先停录音，等识别落定后自动接着修正
+    var correctAfterRecognition = false
     /// 最近几次实际采纳的输入，作为修正的上下文。
     /// 采纳的文本已经是"用户手改 > 模型修正 > ASR 原文"的最终结果，正是上下文该用的版本。
     /// 持久化在 UserDefaults（见 Config.recentContextEntries），重启后仍在；
@@ -1025,6 +1027,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // 修正在途时被取消：丢弃修正，文本仍按 ESC 语义不插入
         isCorrecting = false
         abortCorrection = nil
+        correctAfterRecognition = false
         isRecording = false
         updateStatusIcon()
         stopPanelBindingObserver()
@@ -1065,6 +1068,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         // 如果本次新 ASR 没有识别到文字 且 面板里也没有遗留内容，直接关闭
         if !asrHasText && !panelHasText {
             Log.log("stopRecording: 无识别文字，直接关闭")
+            correctAfterRecognition = false
             asr?.close()
             asr = nil
             orderOutAuxWindowsIfFrontmost()
@@ -1160,6 +1164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !text.isEmpty else {
+            correctAfterRecognition = false
             orderOutAuxWindowsIfFrontmost()
             inputPanel?.hide()
             inputPanel = nil
@@ -1174,13 +1179,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
         inputPanel?.enterAwaitingAction()
         Log.log("识别完成 \(text.count) 字，面板等待操作（⏎ 插入 / 点「修正」）")
+
+        // 录音中点过「修正」：识别落定，接着把文字送去修正
+        if correctAfterRecognition {
+            correctAfterRecognition = false
+            startCorrection()
+        }
     }
 
     /// 用户点了面板上的「修正」按钮。
     /// 结果只覆盖面板内容并以批阅式 diff 展示，**绝不直接插入** —— 用户要能先看清模型动了什么。
     func startCorrection() {
         guard !isCorrecting else { return }
+        // 已经在"等识别落定再修正"的路上，重复点按钮直接忽略
+        guard !correctAfterRecognition else { return }
         guard let panel = inputPanel else { return }
+
+        // 录音中点「修正」：先把录音结束掉，等二遍识别落定后自动接着修正。
+        // 这样用户不用先按快捷键停、再点一次修正。
+        if isRecording {
+            Log.log("[Correct] 录音中点修正：先结束识别，识别完成后自动修正")
+            correctAfterRecognition = true
+            stopRecording()
+            return
+        }
 
         let original = panel.getCurrentText().trimmingCharacters(in: .whitespacesAndNewlines)
         guard !original.isEmpty else { return }

@@ -232,10 +232,13 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         continueButton.isHidden = true
         switch stage {
         case .recording:
+            // 修正按钮在录音中也常驻：随时可以点，点了就结束录音并直接送修正，
+            // 省掉"先按快捷键停、再点修正"两步。
             hintLabel.stringValue = "ESC : 取消    ⏎/快捷键 : 结束识别    点击文字编辑"
-            correctButton.isHidden = true
+            correctButton.isHidden = false
+            correctButton.title = "修正"
             revertButton.isHidden = true
-            hintLabel.frame.size.width = panel.frame.width - padding * 2
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
         case .awaitingAction:
             hintLabel.stringValue = "⏎/快捷键 : 插入    点击文字编辑    ESC : 取消"
             correctButton.isHidden = false
