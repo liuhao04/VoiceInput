@@ -1326,63 +1326,80 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         }
     }
 
-    /// 返回面板显示位置：优先使用文本光标位置，失败则使用鼠标位置
+    /// 面板落点：文本光标 → 鼠标位置 → 目标窗口中心。
+    ///
+    /// 2026-09-02 调整兜底顺序：原来光标定位失败后直接返回"目标窗口中心"，鼠标排在最后、
+    /// 实际永远跑不到。但窗口中心几乎必然离用户的注意力很远——Chrome 拿不到焦点元素
+    /// （默认不构建 accessibility 树），面板就固定弹在网页正中。而按下触发键之前用户通常
+    /// 刚点过输入框，鼠标就在光标附近，是比窗口中心好得多的近似。
+    /// 窗口中心保留为最后一档：鼠标停在目标窗口外时用它，至少保证面板落在正在输入的窗口里。
     func cursorOrMouseScreenPoint() -> NSPoint {
         if let cursorPos = CursorLocator.getCursorPosition() {
             return cursorPos
         }
 
-        let targetApp = lastFrontmostApp ?? NSWorkspace.shared.frontmostApplication
-        if let frontmostApp = targetApp,
-           let pid = frontmostApp.processIdentifier as pid_t? {
+        let mouse = NSEvent.mouseLocation
+        let windowFrame = targetWindowFrame()
+        let point = AppDelegate.panelFallbackPoint(mouse: mouse, targetWindowFrame: windowFrame)
+        // 记来源：日后再看"面板又跑偏了"的日志时，要能一眼分清是走了鼠标还是窗口中心
+        let source = (point == mouse) ? "鼠标位置" : "窗口中心（鼠标在目标窗口外）"
+        Log.log("[Panel] 光标定位失败，兜底用\(source): (\(point.x), \(point.y))")
+        return point
+    }
 
-            let appElement = AXUIElementCreateApplication(pid)
+    /// 兜底落点的纯逻辑部分（便于测试）：鼠标在目标窗口内就用鼠标，否则退到窗口中心。
+    static func panelFallbackPoint(mouse: NSPoint, targetWindowFrame: NSRect?) -> NSPoint {
+        guard let frame = targetWindowFrame, !frame.isEmpty else { return mouse }
+        if frame.contains(mouse) { return mouse }
+        return NSPoint(x: frame.midX, y: frame.midY)
+    }
 
-            // 尝试获取焦点窗口
-            var windowValue: CFTypeRef?
-            if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
-               let window = windowValue {
-                let windowElement = window as! AXUIElement
+    /// 目标应用焦点窗口的 frame（AppKit 坐标系）。AX 拿不到时退到 CGWindowList。
+    private func targetWindowFrame() -> NSRect? {
+        guard let targetApp = lastFrontmostApp ?? NSWorkspace.shared.frontmostApplication else {
+            return nil
+        }
+        let pid = targetApp.processIdentifier
 
-                // 获取窗口 frame
-                var frameValue: CFTypeRef?
-                if AXUIElementCopyAttributeValue(windowElement, "AXFrame" as CFString, &frameValue) == .success,
-                   let frameVal = frameValue,
-                   CFGetTypeID(frameVal) == AXValueGetTypeID() {
-                    var frame = CGRect.zero
-                    if AXValueGetValue(frameVal as! AXValue, .cgRect, &frame) {
-                        // AX frame 是 CG 坐标系（左上角原点），转换为 AppKit 坐标系（左下角原点）
-                        let screenHeight = NSScreen.screens.first?.frame.height ?? 982
-                        let appKitCenterY = screenHeight - (frame.origin.y + frame.size.height / 2)
-                        let windowCenter = NSPoint(x: frame.origin.x + frame.size.width / 2, y: appKitCenterY)
-                        return windowCenter
-                    }
-                }
-            }
+        // AX frame 与 CGWindowList 都是 CG 坐标系（原点在主屏左上、Y 轴向下），统一翻转成 AppKit
+        let screenHeight = NSScreen.screens.first?.frame.height ?? 982
+        let toAppKit: (CGRect) -> NSRect = { cg in
+            NSRect(x: cg.origin.x, y: screenHeight - (cg.origin.y + cg.size.height), width: cg.size.width, height: cg.size.height)
+        }
 
-            // 方法3: 使用 CGWindowListCopyWindowInfo
-            let options = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
-            if let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] {
-                for windowInfo in windowList {
-                    if let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? Int32,
-                       ownerPID == pid,
-                       let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
-                       let x = boundsDict["X"],
-                       let y = boundsDict["Y"],
-                       let width = boundsDict["Width"],
-                       let height = boundsDict["Height"] {
-                        // CGWindowListCopyWindowInfo 返回 CG 坐标系，转换为 AppKit
-                        let screenHeight = NSScreen.screens.first?.frame.height ?? 982
-                        let appKitCenterY = screenHeight - (y + height / 2)
-                        let windowCenter = NSPoint(x: x + width / 2, y: appKitCenterY)
-                        return windowCenter
-                    }
+        let appElement = AXUIElementCreateApplication(pid)
+        var windowValue: CFTypeRef?
+        if AXUIElementCopyAttributeValue(appElement, kAXFocusedWindowAttribute as CFString, &windowValue) == .success,
+           let window = windowValue {
+            let windowElement = window as! AXUIElement
+
+            var frameValue: CFTypeRef?
+            if AXUIElementCopyAttributeValue(windowElement, "AXFrame" as CFString, &frameValue) == .success,
+               let frameVal = frameValue,
+               CFGetTypeID(frameVal) == AXValueGetTypeID() {
+                var frame = CGRect.zero
+                if AXValueGetValue(frameVal as! AXValue, .cgRect, &frame) {
+                    return toAppKit(frame)
                 }
             }
         }
 
-        // Fallback: 使用鼠标位置
-        return NSEvent.mouseLocation
+        let options = CGWindowListOption(arrayLiteral: .excludeDesktopElements, .optionOnScreenOnly)
+        if let windowList = CGWindowListCopyWindowInfo(options, kCGNullWindowID) as? [[String: Any]] {
+            for windowInfo in windowList {
+                if let ownerPID = windowInfo[kCGWindowOwnerPID as String] as? Int32,
+                   ownerPID == pid,
+                   let boundsDict = windowInfo[kCGWindowBounds as String] as? [String: CGFloat],
+                   let x = boundsDict["X"],
+                   let y = boundsDict["Y"],
+                   let width = boundsDict["Width"],
+                   let height = boundsDict["Height"] {
+                    return toAppKit(CGRect(x: x, y: y, width: width, height: height))
+                }
+            }
+        }
+
+        return nil
     }
 
     /// 出错时先停止录音释放麦克风，再弹窗（避免弹窗期间一直占麦）
