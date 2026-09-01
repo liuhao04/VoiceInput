@@ -36,6 +36,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
     private var continueButton: NSButton!
     private var correctButton: NSButton!
     private var revertButton: NSButton!
+    private var acceptButton: NSButton!
     private var waitingSpinner: NSProgressIndicator!
 
     var onPanelClicked: (() -> Void)?
@@ -134,6 +135,16 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         revertButton.autoresizingMask = [.minXMargin]
         hintBar.addSubview(revertButton)
 
+        // 「接受」：diff 视图下采用修正版但不插入，回到等待操作状态（与「还原」成对）
+        acceptButton = NSButton(title: "接受", target: nil, action: nil)
+        acceptButton.bezelStyle = .recessed
+        acceptButton.controlSize = .small
+        acceptButton.font = NSFont.systemFont(ofSize: 11)
+        acceptButton.isHidden = true
+        acceptButton.frame = NSRect(x: totalWidth - padding - 44, y: 2, width: 44, height: hintBarHeight - 4)
+        acceptButton.autoresizingMask = [.minXMargin]
+        hintBar.addSubview(acceptButton)
+
         hintLabel = NSTextField(labelWithString: "")
         hintLabel.font = NSFont.systemFont(ofSize: 11)
         hintLabel.textColor = .secondaryLabelColor
@@ -194,6 +205,13 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         correctButton.action = #selector(correctButtonClicked)
         revertButton.target = self
         revertButton.action = #selector(revertButtonClicked)
+        acceptButton.target = self
+        acceptButton.action = #selector(acceptButtonClicked)
+    }
+
+    @objc private func acceptButtonClicked() {
+        Log.log("[Panel] 点击接受按钮")
+        acceptCorrection()
     }
 
     @objc private func correctButtonClicked() {
@@ -217,6 +235,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
             continueButton.isHidden = true
             correctButton.isHidden = true
             revertButton.isHidden = true
+            acceptButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2
             return
         }
@@ -225,6 +244,7 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
             continueButton.isHidden = false
             correctButton.isHidden = true
             revertButton.isHidden = true
+            acceptButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2 - 80
             return
         }
@@ -238,22 +258,26 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
             correctButton.isHidden = false
             correctButton.title = "修正"
             revertButton.isHidden = true
+            acceptButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
         case .awaitingAction:
             hintLabel.stringValue = "⏎/快捷键 : 插入    点击文字编辑    ESC : 取消"
             correctButton.isHidden = false
             correctButton.title = correctedText == nil ? "修正" : "重新修正"
             revertButton.isHidden = true
+            acceptButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
         case .correcting:
             hintLabel.stringValue = "AI 修正中…    ESC : 放弃修正"
             correctButton.isHidden = true
             revertButton.isHidden = true
+            acceptButton.isHidden = true
             hintLabel.frame.size.width = panel.frame.width - padding * 2
         case .showingDiff:
             correctButton.isHidden = true
             revertButton.isHidden = false
-            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 60
+            acceptButton.isHidden = false
+            hintLabel.frame.size.width = panel.frame.width - padding * 2 - 100
             // 具体文案由 showDiff 写入 diffSummary，这里只负责布局
             hintLabel.stringValue = diffSummary
         }
@@ -321,6 +345,16 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
         guard stage == .showingDiff else { return }
         correctedText = nil
         setPlainText(textBeforeCorrection)
+        stage = .awaitingAction
+        updateHintText()
+    }
+
+    /// 采用修正结果但不插入：面板换成修正后的纯文本，回到等待操作状态。
+    /// 用户可以接着点文字编辑、再修正，或按 ⏎ 插入。
+    /// correctedText 刻意保留：等待操作状态下按钮文案靠它显示「重新修正」。
+    func acceptCorrection() {
+        guard stage == .showingDiff, let corrected = correctedText else { return }
+        setPlainText(corrected)
         stage = .awaitingAction
         updateHintText()
     }
@@ -630,5 +664,9 @@ final class VoiceInputPanel: NSObject, NSTextViewDelegate {
 
     func getCurrentText() -> String {
         return textView.string
+    }
+
+    func isTextEditableForTesting() -> Bool {
+        return textView.isEditable
     }
 }
