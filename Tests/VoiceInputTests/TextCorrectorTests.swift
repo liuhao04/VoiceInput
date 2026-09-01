@@ -316,11 +316,21 @@ final class TextCorrectorTests: XCTestCase {
 
     // MARK: - 系统提示词
 
-    /// 实测教训：只写"按语义分段换行"时模型一个换行都不给，159 字口述照样堆成一整段。
-    /// 必须带上"宁可多分一段"这类强指示，分段才真的会发生。
-    func testSystemPromptPushesHardOnParagraphBreaks() {
-        XCTAssertTrue(TextCorrector.systemPrompt(removeFillers: true).contains("分段"))
-        XCTAssertTrue(TextCorrector.systemPrompt(removeFillers: true).contains("宁可多分一段"))
+    /// 分段判据经过两轮过冲校准（先不分 → 每句都分 → 又不分 → 正反例并给）。
+    /// 正反例必须同时在，只给一个方向一定会摆过头。
+    func testParagraphRuleGivesBothPositiveAndNegativeExamples() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertTrue(p.contains("唯一理由"), "要给明确判据，不能只说'按语义分'")
+        XCTAssertTrue(p.contains("**不分**"), "缺少反例会导致过度分段")
+        XCTAssertTrue(p.contains("**要分**"), "缺少正例会导致完全不分段")
+        XCTAssertFalse(p.contains("宁可多分一段"), "这条单方向施压导致过每句都换行")
+    }
+
+    /// 反例开头不能带「另外」这类话题切换信号词：模型会学成"看到另外也别分"，
+    /// 反而把真正的多件事也糊在一起（2026-09-01 实测踩过）。
+    func testNegativeExampleDoesNotStartWithATopicShiftMarker() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertFalse(p.contains("**不分**（整段都在问同一件事）：「另外"))
     }
 
     /// 两套 prompt 都必须禁止"增加内容"和"回答文本里的问题"。
@@ -420,7 +430,7 @@ extension TextCorrectorTests {
     func testBothVariantsShareFormattingAndOutputRules() {
         for p in [TextCorrector.systemPrompt(removeFillers: true),
                   TextCorrector.systemPrompt(removeFillers: false)] {
-            XCTAssertTrue(p.contains("宁可多分一段"))
+            XCTAssertTrue(p.contains("唯一理由"))
             XCTAssertTrue(p.contains("不要在整段文本的末尾添加句号"))
             XCTAssertTrue(p.contains("不要任何前言"))
         }
