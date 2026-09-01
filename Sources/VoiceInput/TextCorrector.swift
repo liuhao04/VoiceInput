@@ -145,14 +145,15 @@ final class TextCorrector {
 
     // MARK: - Prompt 构建（纯函数，可单测）
 
-    /// 分段那条写得比较重，是实测调出来的：只说"按语义分段换行"时，
-    /// 模型基本只补标点、一个换行都不给，159 字的口述照样堆成一整段。
-    /// 必须明确"宁可多分一段"才会真的分。
     /// 系统提示词。分「保留原话」和「清理赘词」两套，由 `Config.correctionRemoveFillers` 选。
     ///
     /// 两套 prompt 而不是本地词表：赘词和实词的区别只有语境能判断
     /// （「**那个**文件在哪」里的"那个"是指示代词），本地维护 `呃/那个/就是说` 之类的
     /// 词表必然误删。凡是需要理解意思的，一律交给模型。
+    ///
+    /// 【排版】里分段那条写得比较重，是实测调出来的：只说"按语义分段换行"时，
+    /// 模型基本只补标点、一个换行都不给，159 字的口述照样堆成一整段。
+    /// 必须明确"宁可多分一段"才会真的分。
     static func systemPrompt(removeFillers: Bool) -> String {
         let correctness = removeFillers
             ? """
@@ -172,6 +173,7 @@ final class TextCorrector {
         let fillers = removeFillers
             ? """
 
+
             【口语清理】
             - 去掉口头禅和语气词（呃、那个、就是说、然后呢…），以及说话时的自我打断和重复起头。
               例：「我希望它一旦处于，一旦切换到非 busy 状态」→「我希望它一旦切换到非 busy 状态」。
@@ -179,6 +181,7 @@ final class TextCorrector {
             - 「那个」「这个」当指示代词用时（那个文件、这个项目）是实词，必须保留。
             """
             : """
+
 
             【保留原话】
             - 用户要的是逐字保真。口头禅、语气词、重复起头一律保留，只做纠错和排版。
@@ -192,6 +195,7 @@ final class TextCorrector {
         【排版】
         - 句内按语义补齐逗号、顿号等标点。
         - **分段**：口述文本往往是连续一大段。只要文本包含多个意群（话题转折、并列的几件事、先说现象再说想法），就用换行把它拆成多个自然段，一段一个意思。宁可多分一段，也不要堆成一坨。
+        - **段与段之间只用一个换行，不要留空行。**
         - 单个意群的短句保持单行，不要为了分段而分段。
         - **不要在整段文本的末尾添加句号、问号、感叹号**。用户常常把结果粘进搜索框或命令行，末尾的结束标点是多余的。段落中间的标点正常保留。
 
@@ -335,9 +339,11 @@ final class TextCorrector {
     ///   尾巴上一个句号很碍事，这也是快速通道 `TextReplacer` 一直在做的事。
     /// - 压掉多余的空行，避免模型分段时留下三四个连续换行。
     static func normalizeCorrectedText(_ text: String) -> String {
+        // 段间只留一个换行。模型即使被 prompt 要求了也常给空行，这里做确定性兜底。
+        // 空行在粘贴目标里（聊天框、命令行、代码注释）几乎总是多余的。
         var s = text.replacingOccurrences(
-            of: "\n{3,}",
-            with: "\n\n",
+            of: "\n{2,}",
+            with: "\n",
             options: .regularExpression
         )
         s = s.trimmingCharacters(in: .whitespacesAndNewlines)

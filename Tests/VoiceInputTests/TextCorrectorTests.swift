@@ -293,15 +293,19 @@ final class TextCorrectorTests: XCTestCase {
         XCTAssertEqual(TextCorrector.normalizeCorrectedText(s), s)
     }
 
-    /// 分段是核心需求，段间换行必须原样保留
-    func testNormalizeKeepsParagraphBreaks() {
-        let s = "第一段说的是这件事\n\n第二段说的是另一件事"
-        XCTAssertEqual(TextCorrector.normalizeCorrectedText(s), s)
+    /// 分段是核心需求，段间换行必须保留，但只留一个
+    func testNormalizeKeepsParagraphBreaksAsSingleNewline() {
+        XCTAssertEqual(
+            TextCorrector.normalizeCorrectedText("第一段说的是这件事\n第二段说的是另一件事"),
+            "第一段说的是这件事\n第二段说的是另一件事"
+        )
     }
 
-    func testNormalizeCollapsesExcessiveBlankLines() {
-        let s = "第一段\n\n\n\n第二段"
-        XCTAssertEqual(TextCorrector.normalizeCorrectedText(s), "第一段\n\n第二段")
+    /// 用户要的是段间一个换行。空行在聊天框、命令行这些粘贴目标里几乎总是多余的，
+    /// 模型即使被 prompt 要求了也常给空行，所以本地兜底压掉。
+    func testNormalizeCollapsesBlankLinesToASingleNewline() {
+        XCTAssertEqual(TextCorrector.normalizeCorrectedText("第一段\n\n第二段"), "第一段\n第二段")
+        XCTAssertEqual(TextCorrector.normalizeCorrectedText("第一段\n\n\n\n第二段"), "第一段\n第二段")
     }
 
     func testParseAppliesNormalizationToModelOutput() {
@@ -430,5 +434,28 @@ extension TextCorrectorTests {
         let sysOf: ([String: Any]) -> String = { ($0["messages"] as! [[String: String]])[0]["content"]! }
         XCTAssertTrue(sysOf(strip).contains("【口语清理】"))
         XCTAssertTrue(sysOf(keep).contains("【保留原话】"))
+    }
+}
+
+/// 段间只留一个换行（2026-09-01 用户要求）。空行在聊天框、命令行这些粘贴目标里几乎总是多余的。
+/// prompt 里要求 + normalize 本地兜底，两道都要在。
+extension TextCorrectorTests {
+    func testBothPromptVariantsAskForSingleNewlineBetweenParagraphs() {
+        for p in [TextCorrector.systemPrompt(removeFillers: true),
+                  TextCorrector.systemPrompt(removeFillers: false)] {
+            XCTAssertTrue(p.contains("只用一个换行"))
+            XCTAssertTrue(p.contains("不要留空行"))
+        }
+    }
+
+    /// 排版小节之间要有空行分隔，否则【纠错】和【口语清理】会挤在一起
+    func testPromptSectionsAreSeparatedByBlankLines() {
+        let p = TextCorrector.systemPrompt(removeFillers: true)
+        XCTAssertTrue(p.contains("\n\n【口语清理】"), "【口语清理】前应有空行")
+        XCTAssertTrue(p.contains("\n\n【排版】"))
+        XCTAssertTrue(p.contains("\n\n【输出】"))
+
+        let verbatim = TextCorrector.systemPrompt(removeFillers: false)
+        XCTAssertTrue(verbatim.contains("\n\n【保留原话】"), "【保留原话】前应有空行")
     }
 }
