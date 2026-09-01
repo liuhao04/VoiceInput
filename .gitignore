@@ -111,3 +111,6 @@ dist/
 docs/*.pdf
 buildServer.json
 .compile
+
+# 多模型评测的原始响应（体积大、可重算，不入库；结果 JSONL 入库）
+data/model-eval/raw/

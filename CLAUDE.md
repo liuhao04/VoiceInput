@@ -161,6 +161,12 @@ equal+delete 拼回原文、equal+insert 拼出新文，有测试守着。破了
 **GLM 接入的两条硬经验**（来自 ai-info 项目实测，不要重新踩）
 - **必须关 thinking**：payload 里带 `"thinking": {"type": "disabled"}`。GLM-4.7 及以后默认是
   thinking 模型，不关会烧上百 reasoning token、延迟几十秒，且 thinking 吃 max_tokens 预算导致输出截断
+- **国产 thinking 系模型默认都开 thinking，一律要显式关**。这个坑 2026-09-01 在 Kimi 上
+  第二次出现：`kimi-k2.6` / `kimi-k3` 默认 thinking，同一条短文本校对要 10~11 秒、
+  烧 320+ reasoning token；传 `"thinking":{"type":"disabled"}` 后降到 1~2 秒、13~20 token。
+  更坑的是 **temperature 约束跟 thinking 开关联动**：thinking 开着只准 `1`，关掉后只准 `0.6`，
+  传错直接 400，而 400 的报错信息只说温度不对、完全不提 thinking。
+  接任何新的国产模型，第一件事就是查它默认开不开 thinking。
 - **不要用任何 flash 系模型**。免费 `glm-4.7-flash` 有共享池拥塞（429 code 1305），
   请求会被拖到分钟级；付费 `glm-4.7-flashx` 在本账号 2026-07-31 实测 9/9 返回
   429 code **1113 余额不足或无可用资源包**（glm-5.2 同一 key 正常 200）。
