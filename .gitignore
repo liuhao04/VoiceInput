@@ -114,3 +114,10 @@ buildServer.json
 
 # 多模型评测的原始响应（体积大、可重算，不入库；结果 JSONL 入库）
 data/model-eval/raw/
+
+# 多模型评测：内部研究工具，不进公开仓库。
+# 里面有真实语音语料和本机环境细节，仓库是 public 的，推上去删不干净
+# （GitHub force-push 清不掉服务端旧 commit）。本地保留，git 不跟踪。
+data/model-eval/
+scripts/model-eval/
+docs/multi-model-eval-plan.md
