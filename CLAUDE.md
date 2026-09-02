@@ -46,12 +46,29 @@ app 仍留在 `~/Applications/VoiceInput Personal.app`（未删除），但不�
 4. **Personal 版**（需显式 `--personal` / `--personal-only`）：复制到 `~/Applications/VoiceInput Personal.app`、改 Bundle ID/显示名、同一证书签名、kill+open
 5. Flag：`--personal-only` / `--distribution-only` / `--personal`（两个都装）/ `--both`
 
+**🔴 `CFBundlePackageType` 必须有，否则 Gatekeeper 不认它是 app**（2026-09-02 发版才发现）：
+Info.plist 缺 `CFBundlePackageType = APPL` 时，`spctl -a -t exec` 报
+`the code is valid but does not seem to be an app`，用户从 DMG 装完打不开。
+**本机安装一直没暴露**，因为本地文件不带 `com.apple.quarantine`、不走 Gatekeeper 首次验证。
+这条缺陷从项目建起就在（SwiftPM 手搓 bundle，不像 Xcode 会自动写这个键）。
+验收必须模拟真实场景：`xattr -w com.apple.quarantine "0083;0;Safari;" <app>` 之后再
+`spctl -a -t exec -vv`，不加隔离属性的判定过了不算数。
+
 **Distribution 版正式分发（要公证时跑）：**
 ```bash
 ./scripts/build-dmg.sh                 # 签名 + 公证（需要 NOTARIZE_API_KEY_* 环境变量）
 ./scripts/build-dmg.sh --skip-notarize # 仅签名
 ```
 输出：`dist/VoiceInput-<version>.dmg`，用户双击安装。
+
+`build-dmg.sh` 已环境无关化（2026-09-02），guest 侧可直接跑。三个坑：
+- **暂存目录不能用 `/tmp`**（guest 的 /tmp 宿主看不见），**也不能放项目里**
+  （项目在 iCloud Drive，文件带 iCloud 扩展属性，codesign 报
+  `resource fork, Finder information, or similar detritus not allowed`）。
+  现用 `/Users/$USER/.cache/voiceinput-dmg`：共享挂载内、非 iCloud
+- **`notarize.env` 里的 key 路径写的是 `~`**，guest 里展开成 `/home/liuhao.guest/…`，
+  而 notarytool 在宿主执行会找不到。脚本会自动改写成宿主绝对路径
+- 已签名的 bundle 跨 virtiofs 必须用 `ditto` 拷，`cp -R` 会破坏签名
 
 **Personal/Distribution 隔离机制：**
 - 代码层：`CredentialsStore.swift` 通过 `CFBundleName` 选择 `Application Support` 凭证路径，`Logger.swift` 通过 bundle 信息选择日志路径
