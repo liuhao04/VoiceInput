@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [1.1.1] - 2026-09-03
+
+### Fixed
+- Hotkeys no longer stay dead when Accessibility permission is granted *after* the app has launched. The CGEvent tap used to be created exactly once at startup; if permission arrived later the tap silently received no events until the app was restarted. The app now watches the Accessibility permission and rebuilds the tap the moment it is granted, so no restart is needed.
+- The event-tap creation log line now reflects the real permission state instead of always printing ✅.
+
+### Added
+- Permission status (Accessibility and Microphone) is shown permanently in the menu bar menu and at the top of Settings → 通用, with a one-click shortcut to the relevant System Settings pane. Clicking it also registers the app in the Accessibility list so users no longer have to add it manually.
+
+## [1.1.0] - 2026-09-02
+
+### Added
+- Optional AI correction (off by default): after recognition the panel stays open; click 「修正」 to run the text through an LLM. The result replaces the panel content only and is shown as a reviewable diff, never pasted directly.
+- Proper-noun dictionary to fix cold-start recognition of private names.
+- Filler-word cleanup toggle and recent-input context for correction.
+- Recognition history gained a separate 「修正结果」 column.
+
+### Fixed
+- `Info.plist` was missing `CFBundlePackageType`, which made Gatekeeper reject the app when installed from the DMG.
+
 ## [1.0.2] - 2026-04-29
 
 ### Added

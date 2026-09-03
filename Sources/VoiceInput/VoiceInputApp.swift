@@ -80,6 +80,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     // MARK: - 全局快捷键
     private var hotkeyTap: CFMachPort?
+    /// tap 挂在主 run loop 上的 source，重建 tap 时要先摘掉，否则旧 source 泄漏
+    private var hotkeyRunLoopSource: CFRunLoopSource?
+
+    // MARK: - 辅助功能权限监视
+    //
+    // event tap 在辅助功能未授权时也能创建成功，但收不到任何按键事件，而且之后授权也不会
+    // 让它活过来（1.1.0 朋友的机器就是这样：启动后才授权，快捷键从此彻底失灵）。
+    // 所以要盯着权限变化，未授权→已授权时把 tap 拆了重建。
+    private var permissionTracker = PermissionTransitionTracker()
+    private var permissionPollTimer: DispatchSourceTimer?
+    private var accessibilityDistributedObserver: NSObjectProtocol?
+    /// 菜单里常驻的两条权限状态项，menuWillOpen 时刷新
+    private var accessibilityStatusItem: NSMenuItem?
+    private var microphoneStatusItem: NSMenuItem?
     /// 记录上次 flagsChanged 时按下的修饰键集合，用于判断"单独按下并释放"
     private var activeModifiers: UInt64 = 0
     /// 当修饰键按下后如果有其他普通键按下，则标记为组合操作，释放时不触发
@@ -145,6 +159,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         Log.log("全局快捷键已设置，触发键: \(Config.triggerKeys.map { $0.displayName })")
         registerPasteLastHotkey()
         registerCustomTriggerHotkeys()
+        startAccessibilityPermissionMonitor()
         checkAccessibilityPermission()
         // 麦克风权限不在启动时预请求：LSUIElement（菜单栏常驻）应用从后台调用
         // AVCaptureDevice.requestAccess，TCC 守护进程会静默吞掉对话框，
@@ -198,7 +213,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
             NSEvent.removeMonitor(m)
             globalSystemDefinedMonitor = nil
         }
+        permissionPollTimer?.cancel()
+        permissionPollTimer = nil
+        if let o = accessibilityDistributedObserver {
+            DistributedNotificationCenter.default().removeObserver(o)
+            accessibilityDistributedObserver = nil
+        }
         GlobalHotkeyManager.shared.unregisterAll()
+    }
+
+    // MARK: - 辅助功能权限监视
+
+    /// 轮询 + 系统通知双路监视辅助功能权限。
+    /// 轮询开销：AXIsProcessTrusted 是本地缓存查询（不是每次都走 tccd XPC），2 秒一次可忽略；
+    /// `com.apple.accessibility.api` 分布式通知在权限列表变动时即时到达，但它不带内容、
+    /// 且未公开文档，所以只当加速器，不当唯一依据。
+    private func startAccessibilityPermissionMonitor() {
+        // 首次观察只记基线：启动时已授权不需要重建，setupGlobalHotkey 刚建过
+        _ = permissionTracker.observe(trusted: AXIsProcessTrusted())
+
+        let timer = DispatchSource.makeTimerSource(queue: .main)
+        timer.schedule(deadline: .now() + 2.0, repeating: 2.0)
+        timer.setEventHandler { [weak self] in self?.pollAccessibilityPermission() }
+        timer.resume()
+        permissionPollTimer = timer
+
+        accessibilityDistributedObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Notification.Name("com.apple.accessibility.api"),
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            // tccd 落库到 AXIsProcessTrusted 读到新值之间有一小段延迟，稍等再查
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { self?.pollAccessibilityPermission() }
+        }
+    }
+
+    private func pollAccessibilityPermission() {
+        let trusted = AXIsProcessTrusted()
+        guard let transition = permissionTracker.observe(trusted: trusted) else { return }
+        switch transition {
+        case .granted:
+            Log.log("[Permission] 辅助功能权限已授予（进程运行中授权），重建 event tap")
+            rebuildHotkeyTap(reason: "辅助功能权限授予")
+        case .revoked:
+            Log.log("[Permission] ⚠️ 辅助功能权限被撤销，快捷键将失效；重新授权后会自动重建 event tap")
+        }
+        refreshPermissionMenuItems()
+        NotificationCenter.default.post(name: .accessibilityPermissionChanged, object: trusted)
+    }
+
+    /// 拆掉现有 tap（含 run loop source），重新创建。触发键检测状态一并清零。
+    private func rebuildHotkeyTap(reason: String) {
+        teardownHotkeyTap()
+        pendingTrigger = nil
+        otherKeyPressed = false
+        hadOtherModsDuringPending = false
+        activeModifiers = 0
+        if createHotkeyTap() {
+            Log.log("[Hotkey] event tap 已重建（原因: \(reason)）")
+        } else {
+            Log.log("[Hotkey] ❌ event tap 重建失败（原因: \(reason)）")
+        }
+    }
+
+    private func teardownHotkeyTap() {
+        if let tap = hotkeyTap {
+            CGEvent.tapEnable(tap: tap, enable: false)
+            CFMachPortInvalidate(tap)
+        }
+        if let source = hotkeyRunLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes)
+        }
+        hotkeyTap = nil
+        hotkeyRunLoopSource = nil
     }
 
     /// 后台时持续记录当前前台应用（非本 app），供停止时激活并注入文字
@@ -255,6 +342,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
     // MARK: - 全局快捷键实现
 
     private func setupGlobalHotkey() {
+        guard createHotkeyTap() else { return }
+        installGlobalEventMonitors()
+    }
+
+    /// 创建 CGEvent tap 并挂到主 run loop。可重复调用（权限变化后重建），调用前须先 teardownHotkeyTap。
+    /// 返回是否创建成功。创建成功不等于能收到事件：辅助功能未授权时 tap 照样能建，只是收不到按键。
+    @discardableResult
+    private func createHotkeyTap() -> Bool {
         // 使用 CGEvent tap 监听 flagsChanged（修饰键变化）和 keyDown/keyUp（普通键按下/释放）
         let eventMask: CGEventMask = (1 << CGEventType.flagsChanged.rawValue) | (1 << CGEventType.keyDown.rawValue) | (1 << CGEventType.keyUp.rawValue)
 
@@ -342,24 +437,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
                 callback: callback,
                 userInfo: Unmanaged.passUnretained(self).toOpaque()
             ) else {
-                Log.log("[Hotkey] ❌ 无法创建 event tap，请检查辅助功能权限")
-                checkAccessibilityPermission()
-                return
+                Log.log("[Hotkey] ❌ 无法创建 event tap，辅助功能权限: \(AXIsProcessTrusted() ? "已授权" : "未授权")")
+                return false
             }
-            hotkeyTap = sessionTap
-            let runLoopSource = CFMachPortCreateRunLoopSource(nil, sessionTap, 0)
-            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
-            CGEvent.tapEnable(tap: sessionTap, enable: true)
-            Log.log("[Hotkey] ✅ Session-level Event tap 已创建（降级模式）")
-            return
+            attachHotkeyTap(sessionTap, level: "Session-level（降级模式）")
+            return true
         }
 
+        attachHotkeyTap(tap, level: "HID-level")
+        return true
+    }
+
+    /// 挂 run loop、启用，并按真实权限如实写日志。
+    /// 以前这里无条件打 ✅，权限没给也打，排查时完全看不出 tap 其实是死的。
+    private func attachHotkeyTap(_ tap: CFMachPort, level: String) {
         hotkeyTap = tap
         let runLoopSource = CFMachPortCreateRunLoopSource(nil, tap, 0)
+        hotkeyRunLoopSource = runLoopSource
         CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
-        Log.log("[Hotkey] ✅ HID-level Event tap 已创建（先于 BTT 等工具）")
+        Log.log(HotkeyTapLog.creationLine(
+            level: level,
+            trusted: AXIsProcessTrusted(),
+            listenAccess: CGPreflightListenEventAccess()
+        ))
+    }
 
+    /// NSEvent 全局监听器只装一次，tap 重建时不重复装
+    private func installGlobalEventMonitors() {
         // 额外添加 NSEvent 全局监听器（Cocoa 层级）
         // BTT 等工具通过 active CGEvent tap 消费 keyDown 事件后，
         // listenOnly CGEvent tap 看不到这些事件，但 NSEvent 全局监听器可能仍能收到。
@@ -689,6 +794,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         if let firstItem = menu.items.first {
             firstItem.title = isRecording ? "停止语音输入" : "开始语音输入"
         }
+        refreshPermissionMenuItems()
+    }
+
+    /// 按当前真实权限刷新菜单里的两条状态项
+    private func refreshPermissionMenuItems() {
+        let trusted = AXIsProcessTrusted()
+        if let item = accessibilityStatusItem {
+            item.title = PermissionStatusText.accessibility(trusted: trusted)
+            item.isEnabled = !trusted
+            item.image = NSImage(systemSymbolName: trusted ? "checkmark.circle" : "exclamationmark.triangle",
+                                 accessibilityDescription: nil)
+        }
+        let mic = AVCaptureDevice.authorizationStatus(for: .audio)
+        if let item = microphoneStatusItem {
+            item.title = PermissionStatusText.microphone(status: mic)
+            item.isEnabled = mic != .authorized
+            item.image = NSImage(systemSymbolName: mic == .authorized ? "checkmark.circle" : "exclamationmark.triangle",
+                                 accessibilityDescription: nil)
+        }
+    }
+
+    @objc private func openAccessibilitySettings() {
+        // 带 prompt 调用会让 tccd 把本 app 登记进辅助功能列表（否则面板里根本找不到它，只能手动 + 添加）。
+        // 系统提示框只在首次登记时出现一次，之后再调用不会重复弹；已授权时什么都不弹。
+        if !AXIsProcessTrusted() {
+            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+            _ = AXIsProcessTrustedWithOptions(options)
+        }
+        NSWorkspace.shared.open(PermissionSettingsURL.accessibility)
+    }
+
+    @objc private func openMicrophoneSettings() {
+        NSWorkspace.shared.open(PermissionSettingsURL.microphone)
     }
 
     private func buildMenu() -> NSMenu {
@@ -698,6 +836,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
         toggleItem.target = self
         toggleItem.keyEquivalentModifierMask = []
         menu.addItem(toggleItem)
+        menu.addItem(NSMenuItem.separator())
+
+        // 常驻权限状态：未授权时可点击直达系统设置面板；已授权时灰显只作说明。
+        // 1.1.0 的朋友盲切了 10 次触发键，就是因为界面上看不到"权限没给"这件事。
+        let axItem = NSMenuItem(title: "", action: #selector(openAccessibilitySettings), keyEquivalent: "")
+        axItem.target = self
+        menu.addItem(axItem)
+        accessibilityStatusItem = axItem
+        let micItem = NSMenuItem(title: "", action: #selector(openMicrophoneSettings), keyEquivalent: "")
+        micItem.target = self
+        menu.addItem(micItem)
+        microphoneStatusItem = micItem
+        refreshPermissionMenuItems()
         menu.addItem(NSMenuItem.separator())
 
         let settingsItem = NSMenuItem(title: "设置...", action: #selector(openSettings), keyEquivalent: ",")
@@ -831,18 +982,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate, @unche
 
     private func checkAccessibilityPermission() {
         if !AXIsProcessTrusted() {
-            Log.log("⚠️ 辅助功能权限未授予")
+            Log.log("⚠️ 辅助功能权限未授予（授权后会自动重建 event tap，无需重启）")
             DispatchQueue.main.async {
+                NSApp.activate(ignoringOtherApps: true)
                 let alert = NSAlert()
                 alert.messageText = "需要辅助功能权限"
-                alert.informativeText = "VoiceInput 需要辅助功能权限来监听全局快捷键和插入文字。\n请在系统设置中授予权限后重启应用。"
+                // 不要再写"授予后重启"：权限监视会在授权瞬间重建 event tap，重启只是碰巧有效的绕法
+                alert.informativeText = "VoiceInput 需要辅助功能权限来监听全局快捷键和插入文字。\n打开系统设置，在「辅助功能」列表里打开 VoiceInput 的开关即可，授权后立即生效，无需重启。\n菜单栏菜单和设置里随时能看到当前权限状态。"
                 alert.alertStyle = .warning
                 alert.addButton(withTitle: "打开系统设置")
                 alert.addButton(withTitle: "稍后")
                 if alert.runModal() == .alertFirstButtonReturn {
-                    if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                        NSWorkspace.shared.open(url)
-                    }
+                    self.openAccessibilitySettings()
                 }
             }
         }

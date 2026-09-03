@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import SwiftUI
 import ServiceManagement
 
@@ -134,6 +135,11 @@ struct SettingsView: View {
     @State private var editingRuleFrom: [Int: String] = [:]
     @State private var editingRuleTo: [Int: String] = [:]
 
+    @State private var accessibilityTrusted: Bool = AXIsProcessTrusted()
+    @State private var microphoneStatus: AVAuthorizationStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    /// 设置窗口开着时每 2 秒刷新一次权限显示：用户在系统设置里打开开关后回来就该看到变化
+    private let permissionRefreshTimer = Timer.publish(every: 2, on: .main, in: .common).autoconnect()
+
     @State private var selectedTab: Int = 0
     @State private var showingAddRule = false
     @State private var newRuleFrom = ""
@@ -176,6 +182,24 @@ struct SettingsView: View {
     private var generalTab: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
+                // 权限状态常驻在最上面：快捷键不响应时，第一眼就该看到"辅助功能没给"，
+                // 而不是去反复换触发键（1.1.0 事故）。
+                sectionHeader("权限")
+                permissionRow(
+                    ok: accessibilityTrusted,
+                    text: PermissionStatusText.accessibility(trusted: accessibilityTrusted),
+                    hint: accessibilityTrusted ? nil : PermissionStatusText.accessibilityHint,
+                    settingsURL: PermissionSettingsURL.accessibility
+                )
+                permissionRow(
+                    ok: microphoneStatus == .authorized,
+                    text: PermissionStatusText.microphone(status: microphoneStatus),
+                    hint: nil,
+                    settingsURL: microphoneStatus == .notDetermined ? nil : PermissionSettingsURL.microphone
+                )
+
+                Divider()
+
                 // 开机自启动
                 sectionHeader("启动")
                 Toggle("开机自启动", isOn: $launchAtLogin)
@@ -302,6 +326,46 @@ struct SettingsView: View {
             }
             .padding(24)
         }
+        .onAppear { refreshPermissionStatus() }
+        .onReceive(permissionRefreshTimer) { _ in refreshPermissionStatus() }
+        .onReceive(NotificationCenter.default.publisher(for: .accessibilityPermissionChanged)) { _ in
+            refreshPermissionStatus()
+        }
+    }
+
+    private func refreshPermissionStatus() {
+        accessibilityTrusted = AXIsProcessTrusted()
+        microphoneStatus = AVCaptureDevice.authorizationStatus(for: .audio)
+    }
+
+    @ViewBuilder
+    private func permissionRow(ok: Bool, text: String, hint: String?, settingsURL: URL?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 8) {
+                Image(systemName: ok ? "checkmark.circle" : "exclamationmark.triangle")
+                    .foregroundColor(ok ? .secondary : .orange)
+                Text(text).font(.system(size: 12))
+                Spacer()
+                if !ok, let url = settingsURL {
+                    Button("打开系统设置") {
+                        if url == PermissionSettingsURL.accessibility, !AXIsProcessTrusted() {
+                            // 带 prompt 调用让 tccd 把本 app 登记进列表，否则面板里找不到它
+                            let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
+                            _ = AXIsProcessTrustedWithOptions(options)
+                        }
+                        NSWorkspace.shared.open(url)
+                    }
+                    .controlSize(.small)
+                }
+            }
+            if let hint = hint {
+                Text(hint)
+                    .font(.system(size: 11))
+                    .foregroundColor(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .padding(.leading, 4)
     }
 
     private func commitPendingCustomBinding() {

@@ -338,6 +338,36 @@ macOS permissions (Microphone, Accessibility, etc.) are tied to the app's **code
 - Keep `VoiceInput.entitlements` limited to required non-profile entitlements such as `com.apple.security.device.audio-input`
 - Only replace files inside the app bundle, never recreate the bundle from scratch
 
+## 辅助功能权限与 event tap（1.1.1 起，CRITICAL）
+
+**event tap 在辅助功能未授权时照样能创建成功，但收不到任何按键，而且之后授权也不会让它活过来。**
+1.1.0 事故（2026-09-03）：朋友装完先启动、后授权，tap 从此僵死，快捷键完全不响应；日志里
+tap 创建那行无条件打 ✅，界面零反馈，她盲切了 10 次触发键。同一天本机也复现了一次：
+build 280 启动时权限缺失，41 秒后授权，监视器捕获变迁、重建 tap，随后触发/录音/粘贴全部正常。
+
+现行机制（`PermissionStatus.swift` + `AppDelegate`）：
+- `startAccessibilityPermissionMonitor`：2 秒轮询 `AXIsProcessTrusted()` + 监听分布式通知
+  `com.apple.accessibility.api` 作加速器。`PermissionTransitionTracker` 只报变迁不报现状，
+  首次观察只记基线。未授权→已授权 → `rebuildHotkeyTap`（先 `teardownHotkeyTap` 摘 run loop
+  source、invalidate 旧 tap，再 `createHotkeyTap`）。NSEvent 全局监听器只装一次，不随 tap 重建。
+- tap 创建日志走 `HotkeyTapLog.creationLine`：✅ 只在真的已授权时出现，否则 ⚠️ 并写明"授权后自动重建"。
+  有测试守着，别改回无条件 ✅。
+- 权限状态常驻两处：菜单栏菜单顶部两条（辅助功能 / 麦克风，未授权时可点直达系统设置面板）、
+  设置 → 通用最上面「权限」区（2 秒刷新 + 监听 `.accessibilityPermissionChanged`）。
+- 打开辅助功能面板前先 `AXIsProcessTrustedWithOptions(prompt: true)`，让 tccd 把本 app 登记进列表，
+  否则面板里根本没有它、用户只能手动 + 添加。系统提示只在首次登记时弹一次。
+- 任何面向用户的文案**不要再写"授权后重启"**：重启只是碰巧让 tap 在有权限的状态下重建。
+
+**本机实测：辅助功能授权是 cdhash 绑定的，每次重签名都会丢**（2026-09-03，macOS 26.6.2）。
+系统 TCC 库 `/Library/Application Support/com.apple.TCC/TCC.db` 里 `kTCCServiceAccessibility` 那行的
+csreq 是 `FADE0C00 … 00000008 00000014 <20 字节>`，opcode 8 = cdhash；而 4 月授予的
+`kTCCServiceListenEvent` 那行是 `identifier + anchor apple generic + certificate leaf[subject.OU]`
+的正常 designated requirement，几百次重建都没丢过。同一天两次原地更新（build 280 / 281，后者连二进制
+都没变、只改了 Info.plist 版本号）都在启动时报未授权，用户重新授权后由监视器自愈。
+原因未定位（reason=4「system set」，猜测是 26.x 对"更新后的 app"重新确认时改为按 cdhash 记）。
+后果：分发版用户每次升级都可能要重新授权一次。现在有状态 UI 提示、授权即自愈，不再需要重启。
+排查这类问题直接查上面那张表，别在 app 代码里找。读该库经 `hostexec sqlite3`（sshd 会话有 FDA）。
+
 ## Keychain: Don't Use It (Lessons Learned)
 
 **结论**：在 Developer ID 签名 + 非沙盒 + 无 provisioning profile 条件下，macOS Keychain **没有**"不弹窗"的干净方案。本项目应避开 Keychain，凭证改存 `~/Library/Application Support/`。
